@@ -65,7 +65,7 @@ def map_page() -> None:
         radius_min_pixels=3, radius_max_pixels=12, pickable=True, auto_highlight=True)
     deck = pdk.Deck(
         layers=[layer],
-        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
         initial_view_state=pdk.ViewState(latitude=40.79, longitude=-73.96, zoom=11.3),
         tooltip={"html": "<b>{address}</b><br/>#{rank} · score {score_txt}<br/>{risk}<br/>{why}"})
     event = st.pydeck_chart(deck, on_select="rerun", selection_mode="single-object",
