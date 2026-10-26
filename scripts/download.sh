@@ -30,3 +30,10 @@ get facade_fisp xubg-57si "borough='Manhattan'"
 # Building footprints: the BIN <-> BBL bridge (PLUTO has no BIN). Manhattan BINs start with 1.
 get footprints 5zhs-2jue "bin >= 1000000 AND bin < 2000000" \
   "bin,base_bbl,mappluto_bbl,construction_year,height_roof,shape_area,last_status_type,feature_code"
+# HPD registrations: who owns / runs each rental building (links LLCs to the people behind them)
+get hpd_registrations tesw-yqqr "boroid='1'" \
+  "registrationid,buildingid,boroid,block,lot,bin,lastregistrationdate,registrationenddate"
+# Their contacts, citywide (the API can't filter by borough; joined on registrationid locally)
+get hpd_contacts feu5-w2e2 \
+  "type in ('CorporateOwner','HeadOfficer','IndividualOwner','JointOwner','Officer','Agent')" \
+  "registrationid,type,corporationname,firstname,lastname,businesshousenumber,businessstreetname,businesszip"

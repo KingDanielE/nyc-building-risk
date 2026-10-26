@@ -5,15 +5,15 @@ in 2024. Rankers compared:
   - rules_v1:   hand-set weights over 0..1 components (kept to show why it was replaced)
   - learned_v2: same kind of components, one logistic regression per outcome, fit on 2023
                 (features as of 2023-01-01, outcomes during 2023). Coefficients are the
-                weights, so every score still splits into named drivers. This is the product.
+                weights, so every score still splits into named drivers.
+  - learned_v3: v2 plus, per outcome, the components that won on a validation split
+                (fit 2022, validate 2023): repeat-offender flags for serious hazards,
+                landlord-portfolio and managing-agent records for housing distress. The product.
   - gradient boosting on the raw features (fit on 2023), as the accuracy ceiling
   - naive baselines and random
 
-DOB complaints are left out of learned_v2 and the boosting model: that feed stops in April
-2024, so a model can't rely on it when scoring today.
-
-Writes: reports/backtest.md, reports/backtest_metrics.csv, and risk_assessment rows
-(learned_v2) for the backtest date and today.
+Writes: reports/backtest.md, reports/backtest_metrics.csv, reports/validation_metrics.csv and
+risk_assessment rows (learned_v3) for the backtest date and today.
 
 Usage: .venv/Scripts/python scripts/score.py
 """
@@ -33,8 +33,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "data" / "building_risk.duckdb"
 REPORTS = ROOT / "reports"
 
-MODEL_VERSION = "learned_v2"
+MODEL_VERSION = "learned_v3"
 TRAIN_AS_OF, TEST_AS_OF = date(2023, 1, 1), date(2024, 1, 1)
+# Component choice is made on this split only (train 2022 -> validate 2023), never on 2024
+VAL_TRAIN_AS_OF, VAL_AS_OF = date(2022, 1, 1), date(2023, 1, 1)
 KS = [100, 250, 500, 1000]
 
 # Outcomes in the 12 months after as_of
@@ -48,17 +50,31 @@ V1_WEIGHTS = {
     "open_c": 0.20, "dob_hazard": 0.20, "facade": 0.15, "c_rate": 0.15, "dob_open": 0.10,
     "equipment": 0.05, "trend": 0.05, "complaints": 0.05, "age": 0.05,
 }
-# learned_v2 inputs (no complaints, see module docstring)
+# learned_v2 inputs, the same for both outcomes
 V2_COMPONENTS = [
     "open_c", "c_count", "c_rate", "dob_hazard", "facade_unsafe", "facade_swarmp",
     "dob_open", "equipment", "trend", "age",
 ]
+REPEAT = ["hazard_any", "unsafe_and_hazard"]
+LANDLORD = ["portfolio_c_rate", "portfolio_hazards", "portfolio_unsafe", "agent_c_rate"]
+# Candidate additions compared on the validation split (see validate())
+CANDIDATES = {
+    "v2": [], "+complaints": ["complaints"], "+repeat offender": REPEAT,
+    "+landlord & agent": LANDLORD, "+all": ["complaints"] + REPEAT + LANDLORD,
+}
+# learned_v3: per outcome, the validation winner
+V3_COMPONENTS = {
+    "serious_hazard": V2_COMPONENTS + REPEAT,
+    "housing_distress": V2_COMPONENTS + LANDLORD,
+}
 ML_FEATURES = [
     "building_age", "num_floors", "units_res", "units_total", "num_buildings", "is_condo",
     "is_landmark", "in_hist_district", "hpd_c_12m", "hpd_b_12m", "hpd_a_12m", "hpd_open_c",
     "hpd_rent_impairing_12m", "hpd_bc_last_6m", "hpd_bc_prior_6m", "dob_hazard_36m",
-    "dob_equipment_12m", "dob_admin_12m", "dob_open", "facade_severity",
-    "facade_filing_age_years", "owner_lots", "owner_c_per_100_units",
+    "dob_equipment_12m", "dob_admin_12m", "dob_open", "complaints_12m", "facade_severity",
+    "facade_filing_age_years", "owner_lots", "owner_c_per_100_units", "portfolio_lots",
+    "portfolio_c_per_100_units", "portfolio_other_hazards_36m",
+    "portfolio_other_unsafe_facades", "agent_lots", "agent_c_per_100_units",
 ]
 
 
@@ -105,6 +121,14 @@ def components(df: pd.DataFrame) -> pd.DataFrame:
         "trend": saturate(df.hpd_bc_last_6m - df.hpd_bc_prior_6m),
         "complaints": saturate(df.complaints_12m),
         "age": ((df.building_age - 20) / 100).clip(0, 1).fillna(0),
+        # Repeat offender: any DOB hazard in 3 years, and the same with an UNSAFE facade
+        "hazard_any": (df.dob_hazard_36m > 0).astype(float),
+        "unsafe_and_hazard": ((df.facade_severity == 3) & (df.dob_hazard_36m > 0)).astype(float),
+        # Landlord (HPD registration portfolio) and managing agent track records
+        "portfolio_c_rate": saturate(df.portfolio_c_per_100_units.astype(float)),
+        "portfolio_hazards": saturate(df.portfolio_other_hazards_36m.astype(float)),
+        "portfolio_unsafe": saturate(df.portfolio_other_unsafe_facades.astype(float)),
+        "agent_c_rate": saturate(df.agent_c_per_100_units.astype(float)),
     }, index=df.index).astype(float)  # nullable ints from DuckDB would make these object
 
 
@@ -121,13 +145,26 @@ DRIVER_TEXT = {
     "trend": lambda r: f"HPD B+C rising ({r.hpd_bc_prior_6m} -> {r.hpd_bc_last_6m} per 6m)",
     "complaints": lambda r: f"{r.complaints_12m} DOB complaints (12m)",
     "age": lambda r: f"built {r.building_age} years ago",
+    "hazard_any": lambda r: f"repeat offender: {r.dob_hazard_36m} DOB hazard violations (3y)",
+    "unsafe_and_hazard": lambda r: "UNSAFE facade with past hazard violations",
+    "portfolio_c_rate": lambda r: (f"landlord's {r.portfolio_lots} lots: "
+                                   f"{r.portfolio_c_per_100_units} class C per 100 units"),
+    "portfolio_hazards": lambda r: (f"landlord has {r.portfolio_other_hazards_36m} hazard "
+                                    "violations on other buildings (3y)"),
+    "portfolio_unsafe": lambda r: (f"landlord has {r.portfolio_other_unsafe_facades} other "
+                                   "UNSAFE facades"),
+    "agent_c_rate": lambda r: f"managing agent: {r.agent_c_per_100_units} class C per 100 units",
 }
 
 
 def top_drivers(df: pd.DataFrame, contrib: pd.DataFrame, n: int = 3) -> pd.Series:
     """Plain-text names of the n largest positive contributions per lot."""
-    return pd.Series([[DRIVER_TEXT[c](df.loc[i]) for c, v in row.nlargest(n).items() if v > 0.005]
-                      for i, row in contrib.iterrows()], index=df.index)
+    names = np.array(contrib.columns)
+    vals = contrib.to_numpy()
+    top = np.argsort(-vals, axis=1)[:, :n]
+    return pd.Series([[DRIVER_TEXT[names[j]](r) for j in idx if v[j] > 0.005]
+                      for r, v, idx in zip(df.itertuples(index=False), vals, top)],
+                     index=df.index, dtype=object)
 
 
 def v1_score(comp: pd.DataFrame) -> pd.Series:
@@ -135,26 +172,30 @@ def v1_score(comp: pd.DataFrame) -> pd.Series:
 
 
 class LearnedScore:
-    """learned_v2: one logistic regression per outcome over V2_COMPONENTS."""
+    """One logistic regression per outcome, each over its own list of 0..1 components."""
+
+    def __init__(self, cols: dict[str, list[str]]):
+        self.cols = cols
 
     def fit(self, train: pd.DataFrame) -> "LearnedScore":
-        X = components(train)[V2_COMPONENTS]
-        self.models = {lab: LogisticRegression(C=1.0, max_iter=2000).fit(X, train[lab])
-                       for lab in LABELS}
+        X = components(train)
+        self.models = {lab: LogisticRegression(C=1.0, max_iter=3000)
+                       .fit(X[self.cols[lab]], train[lab]) for lab in LABELS}
         return self
 
     def coefs(self) -> pd.DataFrame:
-        return pd.DataFrame({lab: m.coef_[0] for lab, m in self.models.items()},
-                            index=V2_COMPONENTS)
+        """Component x outcome; blank where an outcome's model doesn't use the component."""
+        return pd.DataFrame({lab: pd.Series(m.coef_[0], index=self.cols[lab])
+                             for lab, m in self.models.items()})
 
-    def score(self, df: pd.DataFrame) -> pd.DataFrame:
+    def score(self, df: pd.DataFrame, drivers: bool = True) -> pd.DataFrame:
         """Per-outcome probability, overall score (0..100 percentile of the worse outcome),
-        the outcome driving it, and its top drivers."""
-        X = components(df)[V2_COMPONENTS]
+        the outcome driving it, and (if drivers) its top drivers."""
+        X = components(df)
         out = pd.DataFrame(index=df.index)
         pct = {}
         for lab, m in self.models.items():
-            out[f"p_{lab}"] = m.predict_proba(X)[:, 1]
+            out[f"p_{lab}"] = m.predict_proba(X[self.cols[lab]])[:, 1]
             pct[lab] = out[f"p_{lab}"].rank(pct=True)
         pct = pd.DataFrame(pct)
         out["score"] = 100 * pct.max(axis=1)
@@ -162,8 +203,12 @@ class LearnedScore:
         # Many lots tie near 100; order them by the other outcome's percentile
         out["rank"] = (out.score + pct.min(axis=1) / 1000).rank(
             ascending=False, method="first").astype(int)
-        drivers = {lab: top_drivers(df, X * m.coef_[0]) for lab, m in self.models.items()}
-        out["drivers"] = [drivers[lab][i] for i, lab in out.primary_risk.items()]
+        if drivers:  # text only for each lot's main outcome (row-by-row, so it's the slow part)
+            out["drivers"] = pd.Series(dtype=object)
+            for lab, m in self.models.items():
+                rows = out.index[out.primary_risk == lab]
+                out.loc[rows, "drivers"] = top_drivers(
+                    df.loc[rows], X.loc[rows, self.cols[lab]] * m.coef_[0])
         return out
 
 
@@ -174,7 +219,21 @@ def at_k(y: pd.Series, score: pd.Series, k: int) -> tuple[float, float]:
     return hits / k, hits / max(y.sum(), 1)
 
 
-def backtest(train: pd.DataFrame, test: pd.DataFrame, learned: pd.DataFrame) -> pd.DataFrame:
+def validate(train: pd.DataFrame, val: pd.DataFrame) -> pd.DataFrame:
+    """Average precision and P@100 of each CANDIDATES set on the validation year."""
+    rows = []
+    for name, extra in CANDIDATES.items():
+        s = LearnedScore({lab: V2_COMPONENTS + extra for lab in LABELS}).fit(train).score(
+            val, drivers=False)
+        for lab in LABELS:
+            rows.append({"set": name, "label": lab,
+                         "p@100": at_k(val[lab], s[f"p_{lab}"], 100)[0],
+                         "avg_precision": average_precision_score(val[lab], s[f"p_{lab}"])})
+    return pd.DataFrame(rows)
+
+
+def backtest(train: pd.DataFrame, test: pd.DataFrame,
+             learned: dict[str, pd.DataFrame]) -> pd.DataFrame:
     rows = []
     comp = components(test)
     for label in LABELS:
@@ -182,7 +241,7 @@ def backtest(train: pd.DataFrame, test: pd.DataFrame, learned: pd.DataFrame) -> 
         gbm = HistGradientBoostingClassifier(max_iter=300, learning_rate=0.05, random_state=0)
         gbm.fit(train[ML_FEATURES].astype(float), train[label])
         rankers = {
-            "learned_v2 (this score)": learned[f"p_{label}"],
+            **{name: s[f"p_{label}"] for name, s in learned.items()},
             "gradient boosting (ceiling)": pd.Series(
                 gbm.predict_proba(test[ML_FEATURES].astype(float))[:, 1], index=test.index),
             "rules_v1 (hand weights)": v1_score(comp),
@@ -225,14 +284,24 @@ def save_assessments(con: duckdb.DuckDBPyConnection, df: pd.DataFrame, s: pd.Dat
     con.unregister("out_df")
 
 
-def report(m: pd.DataFrame, test: pd.DataFrame, coefs: pd.DataFrame, today: pd.DataFrame,
-           today_s: pd.DataFrame) -> str:
+def report(m: pd.DataFrame, v: pd.DataFrame, test: pd.DataFrame, coefs: pd.DataFrame,
+           today: pd.DataFrame, today_s: pd.DataFrame) -> str:
     lines = [
         "# Backtest: building risk score", "",
         f"Scored {len(test):,} Manhattan lots as of {TEST_AS_OF} using only earlier events; "
         f"outcomes are the 12 months after. Learned models were fit on features as of "
-        f"{TRAIN_AS_OF} and 2023 outcomes, so 2024 is never seen in training.", "",
-    ]
+        f"{TRAIN_AS_OF} and 2023 outcomes, so 2024 is never seen in training. Which "
+        f"components each model uses was decided on a separate validation split (fit "
+        f"{VAL_TRAIN_AS_OF.year}, validate {VAL_AS_OF.year}), before the 2024 test was run.", "",
+        "## Component choice (validation year, not the test)", "",
+        "| Added to v2 | " + " | ".join(f"{lab} AP / P@100" for lab in LABELS) + " |",
+        "|---|" + "---|" * len(LABELS)]
+    for name, g in v.groupby("set", sort=False):
+        g = g.set_index("label")
+        lines.append(f"| {name} | " + " | ".join(
+            f"{g.avg_precision[lab]:.3f} / {g['p@100'][lab]:.0%}" for lab in LABELS) + " |")
+    lines += ["", "learned_v3 = v2 + repeat offender for serious_hazard, v2 + landlord & agent "
+              "for housing_distress.", ""]
     for label, desc in LABELS.items():
         t = m[m.label == label]
         base = t.base_rate.iloc[0]
@@ -246,10 +315,11 @@ def report(m: pd.DataFrame, test: pd.DataFrame, coefs: pd.DataFrame, today: pd.D
                          + f" | {r['recall@500']:.0%} | {r['p@100'] / base:.1f}× "
                          f"| {r.avg_precision:.3f} |")
         lines.append("")
-    lines += ["## learned_v2 weights (logistic coefficients on 0..1 components)", "",
+    lines += [f"## {MODEL_VERSION} weights (logistic coefficients on 0..1 components)", "",
               "| Component | " + " | ".join(LABELS) + " |", "|---|" + "---|" * len(LABELS)]
     for comp, r in coefs.iterrows():
-        lines.append(f"| `{comp}` | " + " | ".join(f"{r[lab]:+.2f}" for lab in LABELS) + " |")
+        lines.append(f"| `{comp}` | " + " | ".join(
+            "" if pd.isna(r[lab]) else f"{r[lab]:+.2f}" for lab in LABELS) + " |")
     top = today_s.nsmallest(10, "rank")
     lines += ["", f"## Today's top 10 ({date.today()})", "",
               "| Rank | BBL | Address | Score | Main risk | Drivers |", "|---|---|---|---|---|---|"]
@@ -259,10 +329,12 @@ def report(m: pd.DataFrame, test: pd.DataFrame, coefs: pd.DataFrame, today: pd.D
     lines += ["", "## Caveats", "",
               "- rules_v1's hand weights were set before seeing outcomes and lost to simple "
               "baselines; learned_v2 keeps the explainable form but fits the weights on 2023.",
-              "- Static attributes (owner, floors, units) are today's PLUTO, also in the backtest.",
+              "- Static attributes (owner, floors, units) and landlord portfolios / agents are "
+              "today's PLUTO and HPD registrations, also in the backtest.",
               "- Outcomes are recorded violations, so they reflect where agencies inspect: the "
               "score predicts 'will get a serious violation', not 'is unsafe'.",
-              "- DOB complaints end 2024-04-15, so learned_v2 and boosting don't use them.",
+              "- Validation features as of 2022-01-01 see only 24 of the 36 months for "
+              "3-year windows (the data starts in 2020).",
               "- HPD close dates are approximated by the current-status date."]
     return "\n".join(lines) + "\n"
 
@@ -271,15 +343,21 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     REPORTS.mkdir(exist_ok=True)
     with duckdb.connect(str(DB)) as con:
-        train, test, today = (load(con, d) for d in (TRAIN_AS_OF, TEST_AS_OF, date.today()))
-        model = LearnedScore().fit(train)
+        val_train, val, train, test, today = (
+            load(con, d) for d in (VAL_TRAIN_AS_OF, VAL_AS_OF, TRAIN_AS_OF, TEST_AS_OF,
+                                   date.today()))
+        v = validate(val_train, val)
+        model = LearnedScore(V3_COMPONENTS).fit(train)
+        v2 = LearnedScore({lab: V2_COMPONENTS for lab in LABELS}).fit(train)
         test_s, today_s = model.score(test), model.score(today)
-        m = backtest(train, test, test_s)
+        m = backtest(train, test, {f"{MODEL_VERSION} (this score)": test_s,
+                                   "learned_v2 (previous)": v2.score(test, drivers=False)})
         save_assessments(con, test, test_s, TEST_AS_OF)
         save_assessments(con, today, today_s, date.today())
 
     m.to_csv(REPORTS / "backtest_metrics.csv", index=False)
-    md = report(m, test, model.coefs(), today, today_s)
+    v.to_csv(REPORTS / "validation_metrics.csv", index=False)
+    md = report(m, v, test, model.coefs(), today, today_s)
     (REPORTS / "backtest.md").write_text(md, encoding="utf-8")
     print(md)
 

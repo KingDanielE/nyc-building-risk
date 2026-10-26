@@ -148,15 +148,22 @@ def building_page() -> None:
         st.table(pd.DataFrame({"": [show(v) for v in facts.values()]}, index=facts.keys()))
         st.dataframe(db.buildings(bbl), hide_index=True, use_container_width=True)
 
-        st.subheader("Owner")
-        if lot.owner_id is None or pd.isna(lot.owner_id):
-            st.write("No owner on record.")
-        else:
-            st.write(f"**{lot.owner}** ({lot.owner_type}), {lot.owner_lots} lot(s) in Manhattan")
-            pf = db.portfolio(lot.owner_id, AS_OF)
+        st.subheader("Who controls it")
+        st.write(f"**Owner of record:** {show(lot.owner)}"
+                 + (f" ({lot.owner_type})" if pd.notna(lot.owner_type) else ""))
+        if pd.notna(lot.portfolio_id):
+            people = ", ".join(as_list(lot.portfolio_people)[:3])
+            st.write(f"**Landlord portfolio:** {lot.portfolio}: {lot.portfolio_lots} lots, "
+                     f"{int(lot.portfolio_units):,} units (linked through HPD registrations: "
+                     f"{people})")
+            pf = db.linked_lots("portfolio_id", lot.portfolio_id, AS_OF)
             if len(pf) > 1:
                 st.dataframe(pf[pf.bbl != bbl], hide_index=True, use_container_width=True,
                              height=min(250, 40 + 35 * len(pf)))
+        else:
+            st.write("**Landlord portfolio:** not HPD-registered")
+        if pd.notna(lot.agent_id):
+            st.write(f"**Managing agent:** {lot.agent} ({lot.agent_lots} lots in Manhattan)")
 
     st.subheader("Inspection tasks")
     tk = db.tasks(bbl)

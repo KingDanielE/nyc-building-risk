@@ -31,17 +31,20 @@ The tooltip already says why."
 ### 3. Building 360 (0:40–1:15)
 
 **Do:** click a red dot, then "Open building 360". If it's hard to hit one, pick
-*151 West 140 Street (#1)* from the dropdown instead.
+*3458 Broadway (#1)* from the dropdown instead.
 
 **Say:** "This is the building 360: one object with everything linked to it. Here are the
-score and probabilities, and the drivers in plain words: an unsafe facade, 21 open DOB
-violations, 35 open class C. Below is every violation, complaint and facade filing since
+score and probabilities, and the drivers in plain words: an unsafe facade, 26 open DOB
+violations, and past hazard violations. Below is every violation, complaint and facade filing since
 2020, from four agencies, all resolved to this one lot. That entity resolution was most of
 the work: 95 to 99 percent of records matched."
 
-**Do:** scroll to the Owner section.
+**Do:** scroll to "Who controls it".
 
-**Say:** "And the owner, linked through the ontology to their other lots."
+**Say:** "The owner of record is a single-building LLC. But HPD registrations name the people
+behind it, and linking those across registrations shows a landlord with 59 buildings. 41 of
+the other 58 are in Manhattan's riskiest 10% too. That's the kind of link an ontology makes
+visible."
 
 ### 4. Taking action (1:15–1:50) · Inspector queue
 
@@ -58,17 +61,18 @@ the model."
 
 **Show:** the two results tables.
 
-**Say:** "I tested it honestly. I scored every lot as of January 2024 using only earlier
-data, trained on 2023, and checked what happened in 2024. For housing distress, 92 percent of
-the top 100 had ten or more new class C violations, 25 times the base rate. My first
-version, with hand-picked weights, lost to simple baselines, so I replaced it with learned
-weights that are still explainable. For hazards, a naive repeat-offender rule still beats
-the model in the top 100. I'd rather show that than hide it."
+**Say:** "I tested it honestly. I chose the model's inputs on a validation year, then scored
+every lot as of January 2024 using only earlier data and checked what happened in 2024,
+once. For housing distress, 91 percent of the top 100 had ten or more new class C
+violations, 25 times the base rate, and the landlord's track record helped. My first
+version, with hand-picked weights, lost to simple baselines. And for hazards, a naive
+repeat-offender rule still beats the model in the top 100. I'd rather show that than hide
+it."
 
 ### 6. Close (2:20–2:30)
 
-**Say:** "Next I'd add HPD registrations to link owners through their managing agent, and
-the newer DOB complaints feed. The code and write-up are on GitHub."
+**Say:** "Next I'd fuzzy-match landlord names, put known repeat offenders first in the hazard
+queue, and extend it to all five boroughs. The code and write-up are on GitHub."
 
 ---
 

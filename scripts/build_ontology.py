@@ -13,12 +13,21 @@ The spec lives in ontology/ontology.yaml.
 Usage: .venv/Scripts/python scripts/build_ontology.py
 """
 
+import hashlib
 import sys
+from collections import Counter
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 
-DB = Path(__file__).resolve().parent.parent / "data" / "building_risk.duckdb"
+ROOT = Path(__file__).resolve().parent.parent
+DB = ROOT / "data" / "building_risk.duckdb"
+RAW = ROOT / "data" / "raw"
+
+# HPD registration contacts that identify who really controls a building. Managing agents are
+# kept separately: one agent runs buildings for many unrelated owners.
+PERSON_TYPES = ["HeadOfficer", "IndividualOwner", "JointOwner"]
 
 # DOB violation type codes -> what kind of risk they say something about
 DOB_CLASSES = {
@@ -34,6 +43,103 @@ OWNER_PLACEHOLDERS = ["UNAVAILABLE OWNER", "NAME NOT ON FILE", "OWNER NOT ON FIL
 
 def sql_list(items: list[str]) -> str:
     return ", ".join(f"'{i}'" for i in items)
+
+
+def build_portfolios(con: duckdb.DuckDBPyConnection) -> None:
+    """Landlord portfolios and managing agents from HPD registrations.
+
+    Two registered lots are in the same portfolio when their registrations share a head
+    officer / individual / joint owner (by name) or a corporate-owner name; portfolios are the
+    connected components of that lot-contact graph. Each lot also gets the managing agent from
+    its latest registration.
+    """
+    for name in ["hpd_registrations", "hpd_contacts"]:
+        con.sql(f"""create or replace temp view raw_{name} as
+                    select * from read_csv('{(RAW / name).as_posix()}.csv',
+                                           all_varchar=true, header=true)""")
+    # Registration -> PLUTO lot (condo unit lots mapped to the billing lot)
+    con.sql("""
+    create or replace temp table reg_lot as
+    with r as (
+      select registrationid, try_cast(lastregistrationdate as timestamp) as registered_at,
+             case when try_cast(block as int) > 0 and try_cast(lot as int) > 0
+                  then '1' || lpad(cast(cast(block as int) as varchar), 5, '0')
+                       || lpad(cast(cast(lot as int) as varchar), 4, '0') end as src_bbl
+      from raw_hpd_registrations)
+    select r.registrationid, r.registered_at, coalesce(l.bbl, cu.bbl) as bbl
+    from r left join lot l on l.bbl = r.src_bbl
+    left join (select distinct base_bbl, bbl from building where base_bbl <> bbl) cu
+      on cu.base_bbl = r.src_bbl and l.bbl is null
+    where coalesce(l.bbl, cu.bbl) is not null
+    """)
+    clean = "trim(regexp_replace(upper({}), '[^A-Z0-9 ]', ' ', 'g'))"
+    person = (f"{clean.format('k.firstname')} || ' ' || {clean.format('k.lastname')}")
+    edges = con.sql(f"""
+    select distinct r.bbl,
+           case when k.type in ({sql_list(PERSON_TYPES)}) then 'P:' || {person}
+                else 'C:' || {clean.format('k.corporationname')} end as key
+    from reg_lot r join raw_hpd_contacts k using (registrationid)
+    where (k.type in ({sql_list(PERSON_TYPES)}) and length(trim(k.lastname)) > 1
+           and length(trim(coalesce(k.firstname, ''))) > 0)
+       or (k.type = 'CorporateOwner' and length(trim(coalesce(k.corporationname, ''))) > 3)
+    """).fetchall()
+
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for bbl, key in edges:
+        parent[find(bbl)] = find(key)
+    # Name each portfolio after its most-shared person (else corporation)
+    keys_by_root: dict[str, Counter] = {}
+    for bbl, key in edges:
+        keys_by_root.setdefault(find(bbl), Counter())[key] += 1
+    rows = []
+    for bbl in {b for b, _ in edges}:
+        root = find(bbl)
+        ranked = sorted(keys_by_root[root].items(), key=lambda kv: (not kv[0].startswith("P:"),
+                                                                    -kv[1], kv[0]))
+        rows.append({"bbl": bbl, "root": root, "name": ranked[0][0][2:],
+                     "people": [k[2:] for k, _ in ranked if k.startswith("P:")][:5]})
+    lot_pf = pd.DataFrame(rows)
+    lot_pf["portfolio_id"] = "pf_" + lot_pf.root.map(
+        lambda r: hashlib.md5(r.encode()).hexdigest()[:12])
+    con.register("lot_pf", lot_pf)
+    con.sql("""
+    create or replace table landlord_portfolio as
+    select p.portfolio_id, any_value(p.name) as name, any_value(p.people) as people,
+           count(*) as num_lots, sum(coalesce(l.units_res, 0)) as units_res
+    from lot_pf p join lot l using (bbl) group by p.portfolio_id
+    """)
+    con.sql("alter table lot add column if not exists portfolio_id varchar")
+    con.sql("update lot set portfolio_id = p.portfolio_id from lot_pf p where p.bbl = lot.bbl")
+    con.unregister("lot_pf")
+
+    # Managing agent from each lot's latest registration
+    con.sql(f"""
+    create or replace temp table lot_agent as
+    select r.bbl,
+           arg_max(coalesce(nullif({clean.format('k.corporationname')}, ''), {person}),
+                   r.registered_at) as agent_name
+    from reg_lot r join raw_hpd_contacts k using (registrationid)
+    where k.type = 'Agent' group by r.bbl
+    """)
+    con.sql("""
+    create or replace table managing_agent as
+    select 'agt_' || substr(md5(agent_name), 1, 12) as agent_id, agent_name as name,
+           count(*) as num_lots, sum(coalesce(l.units_res, 0)) as units_res
+    from lot_agent a join lot l using (bbl)
+    where length(trim(agent_name)) > 1 group by agent_name
+    """)
+    con.sql("alter table lot add column if not exists agent_id varchar")
+    con.sql("""
+    update lot set agent_id = 'agt_' || substr(md5(a.agent_name), 1, 12)
+    from lot_agent a where a.bbl = lot.bbl and length(trim(a.agent_name)) > 1
+    """)
 
 
 def build(con: duckdb.DuckDBPyConnection) -> None:
@@ -74,6 +180,7 @@ def build(con: duckdb.DuckDBPyConnection) -> None:
     update lot set owner_id = 'own_' || substr(md5(o.owner_name), 1, 12)
     from lot_owner o where o.bbl = lot.bbl and o.owner_name is not null
     """)
+    build_portfolios(con)
 
     # ---- DOB violation class ----------------------------------------------------------------
     cases = " ".join(f"when split_part(type, '-', 1) in ({sql_list(codes)}) then '{cls}'"
@@ -165,7 +272,7 @@ def build(con: duckdb.DuckDBPyConnection) -> None:
              min(filed_on) as facade_oldest_latest_filing
       from facade_bin group by bbl),
     f as (
-      select l.bbl, l.owner_id,
+      select l.bbl, l.owner_id, l.portfolio_id, l.agent_id,
              year(as_of::date) - l.year_built as building_age,
              l.num_floors, l.units_res, l.units_total, l.num_buildings, l.is_condo,
              l.landmark is not null as is_landmark, l.historic_district is not null as in_hist_district,
@@ -187,13 +294,30 @@ def build(con: duckdb.DuckDBPyConnection) -> None:
       from lot l left join ev using (bbl) left join facade fa using (bbl))
     select f.*,
            round(100.0 * f.hpd_c_12m / nullif(f.units_res, 0), 2) as hpd_c_per_100_units,
-           -- Owner portfolio: class C per 100 units across all the owner's lots (incl. this one)
+           -- Owner / portfolio / agent: class C per 100 units across all their lots (incl.
+           -- this one). Null when the lot has no such link (not one big "unknown" group).
            o.num_lots as owner_lots,
-           round(100.0 * sum(f.hpd_c_12m) over w / nullif(sum(f.units_res) over w, 0), 2)
-             as owner_c_per_100_units,
+           case when f.owner_id is not null then round(100.0 * sum(f.hpd_c_12m) over w_own
+             / nullif(sum(f.units_res) over w_own, 0), 2) end as owner_c_per_100_units,
+           p.num_lots as portfolio_lots,
+           case when f.portfolio_id is not null then round(100.0 * sum(f.hpd_c_12m) over w_pf
+             / nullif(sum(f.units_res) over w_pf, 0), 2) end as portfolio_c_per_100_units,
+           -- Landlord's hazard record on their *other* buildings
+           case when f.portfolio_id is not null
+                then sum(f.dob_hazard_36m) over w_pf - f.dob_hazard_36m end
+             as portfolio_other_hazards_36m,
+           case when f.portfolio_id is not null
+                then sum((f.facade_severity = 3)::int) over w_pf - (f.facade_severity = 3)::int end
+             as portfolio_other_unsafe_facades,
+           a.num_lots as agent_lots,
+           case when f.agent_id is not null then round(100.0 * sum(f.hpd_c_12m) over w_agt
+             / nullif(sum(f.units_res) over w_agt, 0), 2) end as agent_c_per_100_units,
            as_of::date as as_of
     from f left join owner o using (owner_id)
-    window w as (partition by f.owner_id)
+    left join landlord_portfolio p using (portfolio_id)
+    left join managing_agent a using (agent_id)
+    window w_own as (partition by f.owner_id), w_pf as (partition by f.portfolio_id),
+           w_agt as (partition by f.agent_id)
     """)
 
     con.sql("""
@@ -235,6 +359,14 @@ def build(con: duckdb.DuckDBPyConnection) -> None:
            count(*) filter (where owner_id is not null
                               and owner_id not in (select owner_id from owner)) as orphans
     from lot
+    union all
+    select 'portfolio_controls_lot', count(*), count(*) filter (where portfolio_id is null),
+           count(*) filter (where portfolio_id is not null and portfolio_id not in
+                              (select portfolio_id from landlord_portfolio)) from lot
+    union all
+    select 'agent_manages_lot', count(*), count(*) filter (where agent_id is null),
+           count(*) filter (where agent_id is not null and agent_id not in
+                              (select agent_id from managing_agent)) from lot
     union all
     select 'lot_has_building', count(*), count(*) filter (where bbl is null),
            count(*) filter (where bbl not in (select bbl from lot)) from building

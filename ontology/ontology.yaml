@@ -9,13 +9,32 @@ object_types:
     description: Owner of record from PLUTO, name-normalized (punctuation and LLC/INC/CORP stripped).
     properties: [name, owner_type, num_lots, num_buildings, units_res]
 
+  LandlordPortfolio:
+    table: landlord_portfolio
+    primary_key: portfolio_id
+    title: name
+    description: >
+      The people behind the LLCs: registered lots linked when their HPD registrations share a
+      head officer / individual or joint owner (by name) or a corporate-owner name (connected
+      components). Named after the most-shared person.
+    properties: [name, people, num_lots, units_res]
+
+  ManagingAgent:
+    table: managing_agent
+    primary_key: agent_id
+    title: name
+    description: >
+      Management company (or person) from the lot's latest HPD registration. Not used to link
+      portfolios: one agent runs buildings for many unrelated owners.
+    properties: [name, num_lots, units_res]
+
   Lot:
     table: lot
     primary_key: bbl
     title: address
     description: Tax lot (borough-block-lot). The risk-scoring unit, since every source reaches it.
     properties: [address, zipcode, bldgclass, year_built, num_floors, units_res, is_condo,
-                 landmark, historic_district, lat, lon, owner_id]
+                 landmark, historic_district, lat, lon, owner_id, portfolio_id, agent_id]
 
   Building:
     table: building
@@ -50,6 +69,9 @@ object_types:
 
 link_types:
   owner_owns_lot:       {from: Owner, to: Lot, cardinality: one-to-many, key: lot.owner_id}
+  portfolio_controls_lot: {from: LandlordPortfolio, to: Lot, cardinality: one-to-many,
+                           key: lot.portfolio_id}
+  agent_manages_lot:    {from: ManagingAgent, to: Lot, cardinality: one-to-many, key: lot.agent_id}
   lot_has_building:     {from: Lot, to: Building, cardinality: one-to-many, key: building.bbl}
   lot_has_event:        {from: Lot, to: Event, cardinality: one-to-many, key: event.bbl}
   building_has_event:   {from: Building, to: Event, cardinality: one-to-many, key: event.bin}
@@ -64,7 +86,9 @@ derived_properties:
     HPD class C/B/A counts (12 months), open class C as of the date, rent-impairing (12m),
     HPD B+C trend (last 6m vs prior 6m), DOB hazard (36m) / equipment (12m) / admin (12m),
     open non-admin DOB violations, DOB complaints (12m), latest facade status and its age,
-    building age, units, floors, and the owner's portfolio rate of class C per 100 units.
+    building age, units, floors; class C per 100 units across the owner's, the landlord
+    portfolio's and the managing agent's lots; the landlord's hazard violations and UNSAFE
+    facades on their other buildings.
   building_features_at: Same event counts keyed on BIN (DOB, complaints, facade, HPD where placed).
 
 actions:

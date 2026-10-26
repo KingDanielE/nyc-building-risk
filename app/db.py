@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAIN_DB = ROOT / "data" / "building_risk.duckdb"
 ACTIONS_DB = ROOT / "data" / "actions.duckdb"
 METRICS_CSV = ROOT / "reports" / "backtest_metrics.csv"
-MODEL_VERSION = "learned_v2"
+MODEL_VERSION = "learned_v3"
 
 OPEN_STATUSES = ("open", "assigned")
 OUTCOMES = ["hazard_found", "minor_issues", "no_issue", "no_access"]
@@ -85,8 +85,13 @@ def backtest_precision() -> dict[str, float]:
 
 def lot(bbl: str) -> pd.Series:
     return query("""
-    select l.*, o.name as owner, o.owner_type, o.num_lots as owner_lots
-    from br.lot l left join br.owner o using (owner_id) where l.bbl = ?
+    select l.*, o.name as owner, o.owner_type, o.num_lots as owner_lots,
+           p.name as portfolio, p.people as portfolio_people, p.num_lots as portfolio_lots,
+           p.units_res as portfolio_units, a.name as agent, a.num_lots as agent_lots
+    from br.lot l left join br.owner o using (owner_id)
+    left join br.landlord_portfolio p using (portfolio_id)
+    left join br.managing_agent a using (agent_id)
+    where l.bbl = ?
     """, [bbl]).iloc[0]
 
 
@@ -104,13 +109,16 @@ def events(bbl: str) -> pd.DataFrame:
     """, [bbl])
 
 
-def portfolio(owner_id: str, as_of: date) -> pd.DataFrame:
-    return query("""
+def linked_lots(link: str, link_id: str, as_of: date) -> pd.DataFrame:
+    """Lots sharing this lot's owner_id / portfolio_id / agent_id, with their scores."""
+    if link not in ("owner_id", "portfolio_id", "agent_id"):
+        raise ValueError(link)
+    return query(f"""
     select l.bbl, l.address, l.units_res, r.score, r.rank, r.primary_risk
     from br.lot l left join br.risk_assessment r
       on r.bbl = l.bbl and r.as_of = ? and r.model_version = ?
-    where l.owner_id = ? order by r.rank nulls last
-    """, [as_of, MODEL_VERSION, owner_id])
+    where l.{link} = ? order by r.rank nulls last
+    """, [as_of, MODEL_VERSION, link_id])
 
 
 def tasks(bbl: str | None = None) -> pd.DataFrame:
