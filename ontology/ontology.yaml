@@ -1,0 +1,75 @@
+# Building-risk ontology (Manhattan). Mirrors Foundry's Ontology: object types backed by
+# tables, link types as keys, actions as writeback tables. Built by scripts/build_ontology.py.
+
+object_types:
+  Owner:
+    table: owner
+    primary_key: owner_id
+    title: name
+    description: Owner of record from PLUTO, name-normalized (punctuation and LLC/INC/CORP stripped).
+    properties: [name, owner_type, num_lots, num_buildings, units_res]
+
+  Lot:
+    table: lot
+    primary_key: bbl
+    title: address
+    description: Tax lot (borough-block-lot). The risk-scoring unit, since every source reaches it.
+    properties: [address, zipcode, bldgclass, year_built, num_floors, units_res, is_condo,
+                 landmark, historic_district, lat, lon, owner_id]
+
+  Building:
+    table: building
+    primary_key: bin
+    description: Physical structure from Building Footprints. A lot can hold several.
+    properties: [construction_year, height_roof_ft, footprint_sqft, status, bbl]
+
+  Event:
+    table: event
+    primary_key: event_id
+    description: >
+      One thing that happened at a building: a DOB or HPD violation, a DOB complaint or a
+      facade (FISP) filing. Source tables keep their full detail.
+    properties: [source, event_date, kind, severity, is_open, closed_on, description, bin, bbl]
+    severity: "0 none, 1 low/admin, 2 serious, 3 hazardous (HPD class C, DOB hazard, facade UNSAFE)"
+    subtypes:
+      HpdViolation: {table: hpd_violation, primary_key: id}
+      DobViolation: {table: dob_violation, primary_key: id}
+      DobComplaint: {table: dob_complaint, primary_key: id}
+      FacadeFiling: {table: facade_filing, primary_key: id}
+
+  RiskAssessment:
+    table: risk_assessment
+    primary_key: [bbl, as_of, model_version]
+    description: A lot's risk score at a point in time, with its top drivers. Filled by the scoring step.
+
+  InspectionTask:
+    table: actions.inspection_task   # data/actions.duckdb, survives data rebuilds
+    primary_key: task_id
+    description: Operational object created by planners from the ranked queue (writeback).
+    status_values: [open, assigned, closed, false_positive]
+
+link_types:
+  owner_owns_lot:       {from: Owner, to: Lot, cardinality: one-to-many, key: lot.owner_id}
+  lot_has_building:     {from: Lot, to: Building, cardinality: one-to-many, key: building.bbl}
+  lot_has_event:        {from: Lot, to: Event, cardinality: one-to-many, key: event.bbl}
+  building_has_event:   {from: Building, to: Event, cardinality: one-to-many, key: event.bin}
+  lot_has_assessment:   {from: Lot, to: RiskAssessment, cardinality: one-to-many, key: risk_assessment.bbl}
+  assessment_has_task:  {from: RiskAssessment, to: InspectionTask, cardinality: one-to-many,
+                         key: "inspection_task.(bbl, as_of, model_version)"}
+
+derived_properties:
+  # Point-in-time: lot_features_at(as_of) / building_features_at(as_of) only count events
+  # before as_of, so the same features train a backtest and score today.
+  lot_features_at: >
+    HPD class C/B/A counts (12 months), open class C as of the date, rent-impairing (12m),
+    HPD B+C trend (last 6m vs prior 6m), DOB hazard (36m) / equipment (12m) / admin (12m),
+    open non-admin DOB violations, DOB complaints (12m), latest facade status and its age,
+    building age, units, floors, and the owner's portfolio rate of class C per 100 units.
+  building_features_at: Same event counts keyed on BIN (DOB, complaints, facade, HPD where placed).
+
+actions:
+  create_inspection_task: {creates: InspectionTask, params: [bbl, bin, reason, priority]}
+  assign_inspector:       {modifies: InspectionTask, params: [task_id, assigned_to]}
+  record_outcome:         {modifies: InspectionTask, params: [task_id, outcome, notes],
+                           outcome_values: [hazard_found, minor_issues, no_issue, no_access]}
+  flag_false_positive:    {modifies: InspectionTask, params: [task_id, notes]}
