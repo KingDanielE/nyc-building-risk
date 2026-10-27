@@ -17,6 +17,7 @@ page and a work queue whose actions are written back.
 | **Backtest (2024, unseen)** | Top 100 lots: **91%** had 10+ new class C housing violations (25× the base rate); **32%** had a serious hazard (20×) |
 | **App** | Streamlit: risk map, building 360, inspector queue with create / assign / record-outcome actions |
 
+**Project page: [nyc-building-risk.vercel.app](https://nyc-building-risk.vercel.app)** ·
 Write-up: [docs/writeup.md](docs/writeup.md) · Backtest: [reports/backtest.md](reports/backtest.md)
 
 ![Risk map](docs/img/map.png)

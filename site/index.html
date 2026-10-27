@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building Risk Ontology · NYC</title>
+<meta name="description" content="Linking 1.28M NYC building records from 8 open datasets into an ontology, scoring every Manhattan lot's risk with an explainable model, and putting it in front of an inspector.">
+<meta property="og:title" content="Building Risk Ontology · NYC open data">
+<meta property="og:description" content="1.28M records, 8 datasets, one ontology. Explainable risk score: 91% precision in the top 100 on a held-out year.">
+<meta property="og:image" content="https://nyc-building-risk.vercel.app/img/map.webp">
+<meta property="og:url" content="https://nyc-building-risk.vercel.app/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b4232c'/><path d='M9 24V12l7-4 7 4v12h-5v-6h-4v6z' fill='white'/></svg>">
+<style>
+  :root {
+    --bg: #fbfaf8; --surface: #ffffff; --ink: #17181c; --muted: #5d6270; --line: #e6e3de;
+    --accent: #b4232c; --accent-soft: #fbe9ea; --amber: #d9822b; --teal: #1f7a6d;
+    --bar-bg: #efece7; --shadow: 0 1px 2px rgba(20,20,30,.05), 0 8px 30px rgba(20,20,30,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111216; --surface: #191b21; --ink: #ecebe8; --muted: #a2a6b2; --line: #2a2d35;
+      --accent: #f0646c; --accent-soft: #3a1c20; --amber: #f0a35a; --teal: #4fc2b0;
+      --bar-bg: #24262e; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 30px rgba(0,0,0,.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+  @media (min-width: 720px) { .wrap { padding: 0 32px; } }
+
+  header.top { border-bottom: 1px solid var(--line); }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { font-weight: 700; letter-spacing: -.01em; display: flex; gap: 10px; align-items: center; }
+  .brand i { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); display: inline-block; }
+  nav a { color: var(--muted); text-decoration: none; margin-left: 20px; font-size: 15px; }
+  nav a:hover { color: var(--ink); }
+  @media (max-width: 640px) { nav a:not(.gh) { display: none; } }
+
+  .hero { padding: 72px 0 40px; }
+  .eyebrow { color: var(--accent); font-weight: 600; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; }
+  h1 { font-size: clamp(34px, 5.6vw, 58px); line-height: 1.05; letter-spacing: -.03em; margin: 14px 0 18px; max-width: 16ch; }
+  .lede { font-size: clamp(18px, 2.2vw, 21px); color: var(--muted); max-width: 62ch; margin: 0; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: 10px;
+         font-weight: 600; font-size: 15px; text-decoration: none; border: 1px solid var(--line);
+         color: var(--ink); background: var(--surface); }
+  .btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .btn svg { width: 18px; height: 18px; }
+
+  .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line);
+           border: 1px solid var(--line); border-radius: 14px; overflow: hidden; margin: 44px 0 0; }
+  @media (min-width: 820px) { .stats { grid-template-columns: repeat(4, 1fr); } }
+  .stat { background: var(--surface); padding: 20px 20px 18px; }
+  .stat b { display: block; font-size: 30px; letter-spacing: -.02em; line-height: 1.1; }
+  .stat span { color: var(--muted); font-size: 14px; }
+
+  figure { margin: 0; }
+  .shot { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow); background: var(--surface); }
+  .shot img { display: block; width: 100%; height: auto; }
+  figcaption { color: var(--muted); font-size: 14px; margin-top: 10px; }
+  .hero-shot { margin-top: 44px; }
+
+  section { padding: 72px 0 0; }
+  h2 { font-size: clamp(26px, 3.4vw, 36px); letter-spacing: -.02em; line-height: 1.15; margin: 0 0 12px; }
+  .sub { color: var(--muted); max-width: 64ch; margin: 0 0 32px; }
+
+  .steps { display: grid; gap: 16px; grid-template-columns: 1fr; counter-reset: s; }
+  @media (min-width: 760px) { .steps { grid-template-columns: repeat(3, 1fr); } }
+  .step { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+  .step::before { counter-increment: s; content: counter(s, decimal-leading-zero); color: var(--accent);
+                  font-weight: 700; font-size: 14px; letter-spacing: .05em; }
+  .step h3 { margin: 6px 0 6px; font-size: 18px; }
+  .step p { margin: 0; color: var(--muted); font-size: 15.5px; }
+  .step code, .card code { font-size: 13.5px; background: var(--bar-bg); padding: 1px 5px; border-radius: 5px; }
+
+  .onto { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px;
+          overflow-x: auto; }
+  /* Below ~640px the labels get too small: keep a minimum size and scroll inside the card */
+  .onto svg { width: 100%; min-width: 620px; height: auto; display: block; }
+  .onto text { font: 600 13px ui-sans-serif, system-ui, sans-serif; fill: var(--ink); }
+  .onto .lbl { font-weight: 500; font-size: 11.5px; fill: var(--muted); }
+  .onto rect { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; }
+  .onto rect.core { stroke: var(--accent); fill: var(--accent-soft); }
+  .onto rect.act { stroke: var(--teal); stroke-dasharray: 4 3; }
+  .onto line, .onto path { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+
+  .results { display: grid; gap: 20px; grid-template-columns: 1fr; }
+  @media (min-width: 860px) { .results { grid-template-columns: 1fr 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+  .card h3 { margin: 0 0 2px; font-size: 18px; }
+  .card .base { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+  .bar { display: grid; grid-template-columns: 150px 1fr 44px; align-items: center; gap: 10px; margin: 9px 0; font-size: 14px; }
+  @media (max-width: 420px) { .bar { grid-template-columns: 110px 1fr 40px; font-size: 13px; } }
+  .bar .track { height: 12px; background: var(--bar-bg); border-radius: 6px; overflow: hidden; }
+  .bar .fill { height: 100%; background: var(--muted); border-radius: 6px; opacity: .55; }
+  .bar.me .fill { background: var(--accent); opacity: 1; }
+  .bar.me { font-weight: 700; }
+  .bar .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .w0{width:0%}.w1{width:1%}.w21{width:21%}.w32{width:32%}.w41{width:41%}.w50{width:50%}
+  .w59{width:59%}.w91{width:91%}.w92{width:92%}
+
+  .findings { display: grid; gap: 16px; grid-template-columns: 1fr; margin-top: 20px; }
+  @media (min-width: 860px) { .findings { grid-template-columns: repeat(3, 1fr); } }
+  .finding { border-left: 3px solid var(--amber); padding: 2px 0 2px 16px; }
+  .finding h4 { margin: 0 0 4px; font-size: 16px; }
+  .finding p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .gallery { display: grid; gap: 28px; grid-template-columns: 1fr; }
+  @media (min-width: 900px) { .gallery { grid-template-columns: 1fr 1fr; align-items: start; } }
+  /* The building page is tall: show its top (score, drivers, timeline, landlord) */
+  .shot.tall img { max-height: 560px; object-fit: cover; object-position: top; }
+
+  .landlord { display: grid; gap: 24px; grid-template-columns: 1fr; align-items: center; }
+  @media (min-width: 860px) { .landlord { grid-template-columns: 1fr 1fr; } }
+  .chain { display: flex; flex-direction: column; gap: 10px; }
+  .chain div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .chain small { color: var(--muted); display: block; font-size: 13px; }
+  .chain .arrow { border: 0; background: none; padding: 0 0 0 18px; color: var(--muted); font-size: 14px; }
+  .chain .hit { border-color: var(--accent); background: var(--accent-soft); }
+
+  .stack { display: flex; flex-wrap: wrap; gap: 8px; }
+  .stack span { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 12px; font-size: 14px; color: var(--muted); }
+
+  footer { margin-top: 88px; border-top: 1px solid var(--line); padding: 28px 0 44px; color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><i></i>Building Risk Ontology</div>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#results">Results</a>
+      <a href="#app">App</a>
+      <a class="gh" href="https://github.com/KingDanielE/nyc-building-risk">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <div class="eyebrow">NYC open data · Manhattan</div>
+    <h1>Which buildings should an inspector visit first, and why?</h1>
+    <p class="lede">NYC's building data is split across agencies that each key it differently. I linked
+      eight of those datasets into one ontology of landlords, lots, buildings and events, scored every
+      Manhattan lot with an explainable model, tested it on a year it never saw, and built the tool a
+      planner would use to act on it.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/KingDanielE/nyc-building-risk">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        View the code</a>
+      <a class="btn" href="https://github.com/KingDanielE/nyc-building-risk/blob/main/docs/writeup.md">Read the write-up</a>
+      <a class="btn" href="https://github.com/KingDanielE/nyc-building-risk/blob/main/reports/backtest.md">Full backtest</a>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>1.28M</b><span>records from 8 NYC datasets</span></div>
+      <div class="stat"><b>95–99.7%</b><span>matched to a tax lot (BBL)</span></div>
+      <div class="stat"><b>13k</b><span>landlord portfolios behind 27.8k lots</span></div>
+      <div class="stat"><b>91%</b><span>precision in the top 100, held-out 2024</span></div>
+    </div>
+
+    <figure class="hero-shot">
+      <div class="shot"><img src="img/map.webp" width="1600" height="1000" alt="Risk map of Manhattan with the highest-risk lots shown as red and orange dots"></div>
+      <figcaption>Risk map: the top 2% of 40,507 Manhattan lots. Red is the top 1%.</figcaption>
+    </figure>
+  </section>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <p class="sub">A pipeline from raw city data to a decision someone can act on, with the ontology in the middle.</p>
+    <div class="steps">
+      <div class="step"><h3>Download</h3><p>Violations, complaints and facade filings from DOB and HPD, PLUTO tax lots, building footprints, and HPD landlord registrations, pulled from the Socrata API.</p></div>
+      <div class="step"><h3>Resolve</h3><p>Every record gets a building (BIN) and a tax lot (BBL): the BIN first, then block/lot, then condo unit lot → billing lot. Placeholder BINs and junk dates are dropped.</p></div>
+      <div class="step"><h3>Link landlords</h3><p>Single-building LLCs are linked through shared head officers and owners in HPD registrations, so each lot knows the landlord and managing agent behind it.</p></div>
+      <div class="step"><h3>Point-in-time features</h3><p><code>lot_features_at(date)</code> counts only events before the date. The backtest and today's score run the same code, so nothing leaks from the future.</p></div>
+      <div class="step"><h3>Explainable score</h3><p>One logistic regression per outcome over 0–1 components. The coefficients are the weights, so every lot gets its top drivers in plain words.</p></div>
+      <div class="step"><h3>Act and write back</h3><p>Planners create inspection tasks from a ranked queue, assign inspectors and record outcomes. Those outcomes are the next model's labels.</p></div>
+    </div>
+
+    <div class="onto" style="margin-top:28px" role="img" aria-label="Ontology diagram: landlord portfolio, managing agent and owner link to lot; lot links to building, events and risk assessment; risk assessment links to inspection task">
+      <svg viewBox="0 0 900 300" xmlns="http://www.w3.org/2000/svg">
+        <rect x="20" y="20" width="190" height="52" rx="10"/><text x="115" y="44" text-anchor="middle">LandlordPortfolio</text><text class="lbl" x="115" y="61" text-anchor="middle">13k · HPD registrations</text>
+        <rect x="20" y="124" width="190" height="52" rx="10"/><text x="115" y="148" text-anchor="middle">ManagingAgent</text><text class="lbl" x="115" y="165" text-anchor="middle">not used to link owners</text>
+        <rect x="20" y="228" width="190" height="52" rx="10"/><text x="115" y="252" text-anchor="middle">Owner</text><text class="lbl" x="115" y="269" text-anchor="middle">owner of record (PLUTO)</text>
+        <rect class="core" x="330" y="124" width="170" height="52" rx="10"/><text x="415" y="148" text-anchor="middle">Lot (BBL)</text><text class="lbl" x="415" y="165" text-anchor="middle">40.5k · scoring unit</text>
+        <rect x="620" y="20" width="170" height="52" rx="10"/><text x="705" y="44" text-anchor="middle">Building (BIN)</text><text class="lbl" x="705" y="61" text-anchor="middle">45k footprints</text>
+        <rect x="620" y="124" width="170" height="52" rx="10"/><text x="705" y="148" text-anchor="middle">Event</text><text class="lbl" x="705" y="165" text-anchor="middle">1.28M violations, filings…</text>
+        <rect class="act" x="620" y="228" width="130" height="52" rx="10"/><text x="685" y="252" text-anchor="middle">RiskAssessment</text><text class="lbl" x="685" y="269" text-anchor="middle">score + drivers</text>
+        <rect class="act" x="770" y="228" width="120" height="52" rx="10"/><text x="830" y="252" text-anchor="middle">InspectionTask</text><text class="lbl" x="830" y="269" text-anchor="middle">writeback</text>
+        <path d="M210 46 C 270 46, 270 140, 330 140"/>
+        <line x1="210" y1="150" x2="330" y2="150"/>
+        <path d="M210 254 C 270 254, 270 160, 330 160"/>
+        <path d="M500 140 C 560 140, 560 46, 620 46"/>
+        <line x1="500" y1="150" x2="620" y2="150"/>
+        <path d="M500 160 C 560 160, 560 254, 620 254"/>
+        <line x1="705" y1="72" x2="705" y2="124"/>
+        <line x1="750" y1="254" x2="770" y2="254"/>
+      </svg>
+    </div>
+  </section>
+
+  <section id="landlords">
+    <div class="landlord">
+      <div>
+        <h2>The owner on paper is rarely the landlord</h2>
+        <p class="sub" style="margin-bottom:0">Most Manhattan rentals are each held by their own LLC. HPD registrations name
+          the people behind them. Linking lots that share a head officer, an owner or a corporate-owner name turns
+          27,800 lots into 13,000 landlord portfolios. A landlord's track record across all their buildings then
+          becomes a risk signal, and it helped on the held-out year.</p>
+      </div>
+      <div class="chain" aria-label="Example: from LLC to landlord portfolio">
+        <div><small>Owner of record (PLUTO)</small>BIRDIE 141 BROADWAY ASSOCIATES</div>
+        <div class="arrow">↓ HPD registration: head officer</div>
+        <div class="hit"><small>Landlord portfolio</small>59 lots · 5,086 units</div>
+        <div class="arrow">↓ scores of their other buildings</div>
+        <div><small>Risk</small>41 of the other 58 are in Manhattan's riskiest 10%</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="results">
+    <h2>Does it work?</h2>
+    <p class="sub">Every lot was scored as of 1 January 2024 using only earlier data, then checked against what happened
+      in 2024. The model's inputs were chosen on a separate validation year, so 2024 was used once, as a test.
+      The bars show the share of the 100 highest-ranked lots that had the outcome.</p>
+    <div class="results">
+      <div class="card">
+        <h3>Housing distress</h3>
+        <p class="base">10+ new immediately-hazardous (class C) violations in 12 months · base rate 3.6%</p>
+        <div class="bar me"><span>This score</span><div class="track"><div class="fill w91"></div></div><span class="v">91%</span></div>
+        <div class="bar"><span>Gradient boosting</span><div class="track"><div class="fill w91"></div></div><span class="v">91%</span></div>
+        <div class="bar"><span>Same as last year</span><div class="track"><div class="fill w92"></div></div><span class="v">92%</span></div>
+        <div class="bar"><span>Hand-set weights</span><div class="track"><div class="fill w59"></div></div><span class="v">59%</span></div>
+        <div class="bar"><span>Random</span><div class="track"><div class="fill w0"></div></div><span class="v">0%</span></div>
+      </div>
+      <div class="card">
+        <h3>Serious hazard</h3>
+        <p class="base">DOB hazard violation or UNSAFE facade filing in 12 months · base rate 1.6%</p>
+        <div class="bar me"><span>This score</span><div class="track"><div class="fill w32"></div></div><span class="v">32%</span></div>
+        <div class="bar"><span>Gradient boosting</span><div class="track"><div class="fill w41"></div></div><span class="v">41%</span></div>
+        <div class="bar"><span>Same as last year</span><div class="track"><div class="fill w50"></div></div><span class="v">50%</span></div>
+        <div class="bar"><span>Hand-set weights</span><div class="track"><div class="fill w21"></div></div><span class="v">21%</span></div>
+        <div class="bar"><span>Random</span><div class="track"><div class="fill w1"></div></div><span class="v">1%</span></div>
+      </div>
+    </div>
+    <div class="findings">
+      <div class="finding"><h4>My first version lost</h4><p>Weights I set by hand lost to naive baselines: one score for two different risks diluted both. One model per outcome fixed it and stayed explainable.</p></div>
+      <div class="finding"><h4>Explainable costs nothing here</h4><p>For housing distress the explainable model matches gradient boosting on overall ranking (average precision 0.572 vs 0.570).</p></div>
+      <div class="finding"><h4>Repeat offenders still win at the top</h4><p>For hazards, "had a hazard before" beats every model in the top 100. A validation-year gain didn't replicate, and I didn't tune on the test year to hide it.</p></div>
+    </div>
+  </section>
+
+  <section id="app">
+    <h2>The tool</h2>
+    <p class="sub">A Streamlit app over the ontology: a map, a 360° page per building, and a work queue whose actions are written back.</p>
+    <div class="gallery">
+      <figure>
+        <div class="shot tall"><img src="img/building.webp" width="1400" height="1701" loading="lazy" alt="Building 360 page showing score, drivers, event timeline, lot facts and the landlord's other buildings"></div>
+        <figcaption>Building 360: drivers, every linked event since 2020, and who controls the building.</figcaption>
+      </figure>
+      <figure>
+        <div class="shot"><img src="img/queue.webp" width="1600" height="1000" loading="lazy" alt="Inspector queue listing the highest-risk lots with their drivers"></div>
+        <figcaption>Inspector queue: select lots, create tasks, assign inspectors, record outcomes.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>Built with</h2>
+    <div class="stack">
+      <span>Python</span><span>DuckDB</span><span>SQL table macros</span><span>pandas</span><span>scikit-learn</span>
+      <span>Streamlit</span><span>pydeck</span><span>Altair</span><span>Socrata API</span><span>Playwright</span>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>By Daniel · <a href="https://github.com/KingDanielE/nyc-building-risk">github.com/KingDanielE/nyc-building-risk</a></span>
+    <span>Data: <a href="https://opendata.cityofnewyork.us/">NYC Open Data</a> (DOB, HPD, DCP). Scores predict recorded violations, not safety.</span>
+  </div>
+</footer>
+</body>
+</html>
