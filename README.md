@@ -153,3 +153,8 @@ select * from risk_assessment where as_of = current_date order by rank limit 20;
 - **HPD violations carry only block/lot,** so their BIN is known only when the lot has one
   building.
 - **Building attributes and landlord links are today's values,** even in the backtest.
+
+## Contact
+
+Daniel Engelberg · [danielengelberg131@gmail.com](mailto:danielengelberg131@gmail.com) ·
+[LinkedIn](https://www.linkedin.com/in/danielengelberg/) · [CV (PDF)](site/cv/Daniel-Engelberg-CV.pdf)
