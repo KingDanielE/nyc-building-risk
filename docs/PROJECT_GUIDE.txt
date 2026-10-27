@@ -1,0 +1,991 @@
+================================================================================
+BUILDING-RISK ONTOLOGY FROM NYC OPEN DATA
+Complete project guide: what was built, how, why, and what it showed
+================================================================================
+
+Repository : https://github.com/KingDanielE/nyc-building-risk
+Project page: https://nyc-building-risk.vercel.app
+Scope       : Manhattan, events from 2020-01-01 to 2026-10-26
+Last updated: 2026-10-27
+
+CONTENTS
+   1. One-paragraph summary
+   2. The problem and who it is for
+   3. Glossary (read this first if the NYC terms are new)
+   4. Data sources
+   5. Downloading the data
+   6. Entity resolution: giving every record a BIN and a BBL
+   7. The ontology: objects, properties, links, actions
+   8. Cleaning and classification decisions
+   9. Landlord portfolios and managing agents
+  10. Point-in-time features
+  11. Outcomes (what the model predicts)
+  12. The models: v1, v2, v3, and the comparisons
+  13. Evaluation method: train, validate, test
+  14. Results
+  15. What the results mean
+  16. How a score is turned into drivers, a percentile and a rank
+  17. The Streamlit app
+  18. Writeback and storage
+  19. The landing page
+  20. Repository layout
+  21. How to run everything
+  22. Design decisions and trade-offs
+  23. Limitations
+  24. Bugs found along the way, and what they taught
+  25. Future work
+  26. Interview talking points
+  27. Project timeline
+
+
+--------------------------------------------------------------------------------
+1. ONE-PARAGRAPH SUMMARY
+--------------------------------------------------------------------------------
+
+New York City publishes building data from several agencies, and each agency
+identifies buildings in its own way. This project downloads eight of those
+datasets for Manhattan, matches every record to a physical building and a tax
+lot, and organises the result as an ontology: landlords, managing agents and
+owners control lots; lots hold buildings; events (violations, complaints,
+facade filings) happen at them. On top of that ontology it computes features
+"as of" any date, trains an explainable model that predicts two kinds of
+trouble in the next 12 months, tests the model on a year it never saw, and
+serves the result in a Streamlit app where an inspection planner can see why a
+building is risky and create, assign and close inspection tasks. A static
+landing page on Vercel presents the project.
+
+Headline numbers:
+  - 1,281,497 events from 8 sources, Manhattan, 2020 onward
+  - 95.2-99.7% of records matched to a tax lot, 89.2-100% to a building
+  - 27,832 lots linked into 13,120 landlord portfolios (largest: 234 lots)
+  - Held-out 2024 test, top 100 lots:
+      91% had 10+ new class C housing violations (base rate 3.6%, about 25x)
+      32% had a serious hazard (base rate 1.6%, about 20x)
+
+
+--------------------------------------------------------------------------------
+2. THE PROBLEM AND WHO IT IS FOR
+--------------------------------------------------------------------------------
+
+User: an inspection planner at a city agency (HPD or DOB), or a large property
+manager reviewing a portfolio.
+
+Decision supported: which buildings to inspect first this week, and why.
+
+Why it is hard:
+  - Evidence about deteriorating buildings exists, but it is split across
+    agencies. HPD housing violations are keyed by block and lot. DOB
+    violations, complaints and facade filings are keyed by building number
+    (BIN). Ownership lives in PLUTO, a tax-lot file with no BIN at all.
+  - The "owner" in PLUTO is usually a single-building LLC, which hides the
+    landlord who actually controls dozens of buildings.
+  - Raw counts mislead: a big building collects more violations simply by
+    having more apartments, and some violations are paperwork, not danger.
+
+What the project delivers:
+  - One linked model of the data (the ontology).
+  - A ranked list of lots with a probability for each risk and plain-language
+    reasons ("facade UNSAFE; 26 open DOB violations; ...").
+  - Honest evidence of how well the ranking works on a year it never saw.
+  - A tool to act on it, with outcomes written back.
+
+
+--------------------------------------------------------------------------------
+3. GLOSSARY
+--------------------------------------------------------------------------------
+
+BBL      Borough-Block-Lot. The 10-digit tax-lot id: 1 digit borough
+         (1 = Manhattan), 5 digits block, 4 digits lot. Example 1020730001.
+BIN      Building Identification Number. 7 digits, first digit is the
+         borough. Identifies a physical structure. One lot can hold several
+         buildings.
+"Million BIN"  Placeholder BINs like 1000000, 2000000 used when the real BIN
+         is unknown. They must be ignored, never matched.
+Condo billing lot  Condominium buildings appear in PLUTO once, under a billing
+         lot numbered 75xx. Individual condo units have their own lots
+         (1001+). Other datasets sometimes use the unit lot.
+PLUTO    Primary Land Use Tax Lot Output, published by City Planning (DCP).
+         One row per tax lot: address, year built, floors, units, owner.
+DOB      Department of Buildings: construction, boilers, elevators, facades.
+HPD      Department of Housing Preservation and Development: housing
+         maintenance code (heat, leaks, lead paint, pests...).
+HPD violation classes
+         A  non-hazardous            (90 days to correct)
+         B  hazardous                (30 days)
+         C  immediately hazardous    (24 hours for most; 5 days for some)
+         I  information orders
+FISP     Facade Inspection Safety Program (Local Law 11). Buildings over six
+         storeys file a facade report every five-year cycle. Statuses:
+         SAFE, SWARMP (Safe With A Repair and Maintenance Program, meaning
+         it needs repairs) and UNSAFE (hazardous, must be fixed right away).
+HPD registration  Owners of residential rentals with 3+ units must register
+         every year, naming the owner, head officer and managing agent.
+Socrata  The platform behind NYC Open Data; its API supports SQL-like
+         filters ($where, $select, $limit).
+Ontology Here: a model of the domain as object types (Lot, Building...),
+         link types between them, properties, and actions that change data.
+         This mirrors Palantir Foundry's Ontology.
+Precision@k  Of the k highest-ranked lots, the share that actually had the
+         outcome. P@100 = 0.91 means 91 of the top 100.
+Recall@k Of all lots that had the outcome, the share found in the top k.
+Average precision (AP)  Summary of precision across the whole ranking
+         (area under the precision-recall curve). Random ranking scores the
+         base rate.
+Lift     Precision divided by the base rate. 25x means 25 times better than
+         picking lots at random.
+Base rate  Share of all lots that had the outcome.
+Point-in-time  Computing a feature using only data available on a given date,
+         so a backtest cannot see the future.
+
+
+--------------------------------------------------------------------------------
+4. DATA SOURCES
+--------------------------------------------------------------------------------
+
+All from NYC Open Data (data.cityofnewyork.us). Rows are the Manhattan
+extract actually loaded.
+
+  #  Dataset (Socrata id)                     Rows      Key          Role
+  -- --------------------------------------- --------- ------------ ---------
+  1  PLUTO (64uk-42ks)                         42,504   BBL          Lots,
+                                                                     owners
+  2  Building Footprints (5zhs-2jue)           45,171   BIN, BBL     BIN<->BBL
+                                                                     bridge
+  3  DOB Violations (3h2n-5cm9)               100,769   BIN, blk/lot Events
+  4  HPD Housing Maintenance Code             955,054   block/lot    Events
+     Violations (wvxf-dwi5)
+  5  DOB Complaints Received (eabe-havv)      174,695   BIN          Events
+  6  DOB NOW Safety Facades / FISP             50,979   BIN, blk/lot Events
+     (xubg-57si)
+  7  HPD Multiple Dwelling Registrations       30,433   block/lot,   Landlord
+     (tesw-yqqr)                                        BIN          links
+  8  HPD Registration Contacts (feu5-w2e2)    591,839   registration Landlord
+                                              (citywide) id          links
+
+Filters used:
+  PLUTO              borough = 'MN'
+  Footprints         1000000 <= bin < 2000000 (Manhattan BINs)
+  DOB violations     boro = '1' and issue_date >= 20200101
+  HPD violations     boroid = '1' and inspection date >= 2020-01-01
+                     (only 15 useful columns selected: the file is large)
+  DOB complaints     community board starting with '1' and entered in 202x
+  Facade filings     borough = 'Manhattan' (all cycles)
+  Registrations      boroid = '1'
+  Contacts           types CorporateOwner, HeadOfficer, IndividualOwner,
+                     JointOwner, Officer, Agent. Citywide, because the API
+                     cannot filter contacts by borough; they are joined to
+                     Manhattan registrations locally.
+
+Why these sources: together they cover the three things a planner needs:
+what the building is (PLUTO, footprints), what has gone wrong there (four
+event feeds), and who is responsible (registrations).
+
+Left out on purpose (to fit a 10-12 hour budget): 311 service requests
+(23M rows citywide, address-only matching) and FDNY incidents (6M rows).
+
+A data note: the DOB complaints feed first appeared to stop on 2024-04-15.
+DOB refreshed the dataset on 2026-10-25 and the same query then returned
+174,695 rows instead of 110,772, running to 2026-10-26. Re-downloading fixed
+the gap; no separate "DOB NOW complaints" dataset exists.
+
+
+--------------------------------------------------------------------------------
+5. DOWNLOADING THE DATA        (scripts/download.sh)
+--------------------------------------------------------------------------------
+
+A bash script with one helper, get(name, id, where, [select]), which calls
+the Socrata CSV endpoint with $where, optional $select and $limit=5000000,
+retries up to three times on any error (including TLS resets), and prints
+row count and size. Output: data/raw/<name>.csv, about 480 MB in total.
+data/ is git-ignored; anyone can rebuild it by re-running the script.
+
+
+--------------------------------------------------------------------------------
+6. ENTITY RESOLUTION        (scripts/build_db.py)
+--------------------------------------------------------------------------------
+
+Goal: every event record gets a building (BIN) and a tax lot (BBL), whatever
+key its source uses.
+
+Reference tables built first:
+  lot       from PLUTO; BBL normalised to a 10-digit string.
+  building  from footprints; keeps only real Manhattan BINs (7 digits,
+            starting with 1, not a million-BIN). Each building carries
+            mappluto_bbl (the PLUTO lot it belongs to, which is the condo
+            billing lot for condos) and base_bbl (its own lot).
+
+Each source's block and lot are turned into a BBL with
+'1' + block padded to 5 digits + lot padded to 4 digits, only when both are
+positive integers.
+
+Resolution order for every record (the match_method column records which
+step won):
+  1. bin         The record's BIN is a real building in footprints.
+                 BBL = that building's mappluto_bbl.
+  2. bbl         The record's block/lot is a PLUTO lot. If that lot holds
+                 exactly one building, its BIN is filled in too.
+  3. condo_unit  The block/lot is a condo unit lot (found as some building's
+                 base_bbl); it is mapped to the PLUTO billing lot.
+  4. bin_only    The BIN looks real but is not in footprints (demolished or
+                 newly built). BIN kept, BBL left empty.
+  5. unresolved  Nothing usable.
+
+Results (table match_report):
+
+  Source          Rows      Has BBL  Has BIN  by_bin   by_bbl  condo  bin_only unresolved
+  dob_complaint   174,695    95.2%   100.0%   166,282       0      0    8,413        0
+  dob_violation   100,769    99.5%   100.0%    97,809   2,179    280      492        9
+  facade_filing    50,979    99.6%    99.9%    50,159     508    111      186       15
+  hpd_violation   955,054    99.7%    89.2%         0 951,856    574        0    2,624
+
+Why HPD reaches only 89% for BIN: HPD records carry block/lot only. When a
+lot holds several buildings, there is no way to tell which one a violation
+belongs to, so BIN stays empty rather than guessed.
+
+Data quality handled here:
+  - Placeholder BINs (1000000 etc.) never match.
+  - Junk dates (e.g. 'Y9990120') parse to NULL via try_strptime.
+  - Date formats differ by source: YYYYMMDD (DOB violations), ISO
+    timestamps (HPD), MM/DD/YYYY (complaints, facades). Each is parsed
+    explicitly.
+  - Fixed-width DOB violation type strings are split into a code
+    ("LBLVIO") and a description.
+
+
+--------------------------------------------------------------------------------
+7. THE ONTOLOGY        (ontology/ontology.yaml, scripts/build_ontology.py)
+--------------------------------------------------------------------------------
+
+The ontology is defined in ontology/ontology.yaml and materialised as DuckDB
+tables. It deliberately mirrors Palantir Foundry's concepts: object types
+backed by tables, link types as keys, actions as writeback.
+
+OBJECT TYPES (rows as of the last build)
+
+  LandlordPortfolio   13,120  The people behind the LLCs (section 9).
+                              Key portfolio_id. Properties: name, people
+                              (top 5 linking names), num_lots, units_res.
+  ManagingAgent       10,436  Management company or person from the latest
+                              HPD registration. Key agent_id.
+  Owner               32,871  Owner of record from PLUTO, name-normalised.
+                              Key owner_id. Properties: name, owner_type
+                              (private, tax_exempt, city, other_public,
+                              mixed), num_lots, num_buildings, units_res.
+  Lot                 42,504  Tax lot. Key bbl. The scoring unit, because
+                              every source can reach it. Properties: address,
+                              zipcode, building class, year built, floors,
+                              units, condo flag, landmark, historic
+                              district, lat/lon, owner_id, portfolio_id,
+                              agent_id.
+  Building            45,171  Physical structure. Key bin. Properties:
+                              construction year, roof height, footprint area,
+                              status, bbl.
+  Event            1,281,497  One thing that happened at a building. Key
+                              event_id ('hpd:...', 'dob:...', 'cmp:...',
+                              'fsp:...'). Properties: kind, event_date,
+                              detail (class / DOB class / status), severity
+                              0-3, is_open, closed_on, rent_impairing,
+                              description, bin, bbl. The full source rows
+                              stay in hpd_violation, dob_violation,
+                              dob_complaint and facade_filing (subtypes).
+  RiskAssessment      81,014  A lot's score at a point in time (40,507 lots
+                              x 2 dates). Key (bbl, as_of, model_version).
+                              Properties: score, rank, drivers,
+                              p_serious_hazard, p_housing_distress,
+                              primary_risk.
+  InspectionTask      (live)  Created by planners in the app. Key task_id.
+                              Status open / assigned / closed /
+                              false_positive. Stored separately (section 18).
+
+LINK TYPES
+
+  portfolio_controls_lot   LandlordPortfolio 1 -> N Lot     (lot.portfolio_id)
+  agent_manages_lot        ManagingAgent     1 -> N Lot     (lot.agent_id)
+  owner_owns_lot           Owner             1 -> N Lot     (lot.owner_id)
+  lot_has_building         Lot               1 -> N Building (building.bbl)
+  lot_has_event            Lot               1 -> N Event   (event.bbl)
+  building_has_event       Building          1 -> N Event   (event.bin)
+  lot_has_assessment       Lot               1 -> N RiskAssessment
+  assessment_has_task      RiskAssessment    1 -> N InspectionTask
+
+Link integrity (table link_check): rows pointing at a missing object.
+
+  owner_owns_lot           42,504 lots, 2,114 without owner, 0 orphans
+  portfolio_controls_lot   42,504 lots, 14,672 without portfolio, 0 orphans
+  agent_manages_lot        42,504 lots, 16,039 without agent, 0 orphans
+  lot_has_building         45,171 buildings, 51 pointing at a lot not in PLUTO
+  lot_has_event            1,281,497 events, 21 pointing at a missing lot
+  building_has_event       12,142 events with a BIN not in footprints
+                           (the bin_only cases above)
+
+ACTIONS (writeback, defined in the spec, implemented in app/db.py)
+
+  create_inspection_task   creates InspectionTask (bbl, bin, reason,
+                           priority). BIN filled when the lot has one
+                           building.
+  assign_inspector         sets assigned_to, status 'assigned'.
+  record_outcome           outcome in {hazard_found, minor_issues,
+                           no_issue, no_access}, notes, status 'closed'.
+  flag_false_positive      outcome 'no_issue', status 'false_positive'.
+
+
+--------------------------------------------------------------------------------
+8. CLEANING AND CLASSIFICATION DECISIONS
+--------------------------------------------------------------------------------
+
+8.1 Event severity (0-3), used across sources:
+      HPD:      C = 3, B = 2, A and I = 1
+      DOB:      hazard = 3, admin = 1, equipment / construction / other = 2
+      Complaint: 1
+      Facade:   UNSAFE = 3, SWARMP = 2, No Report Filed = 2, SAFE = 0
+
+8.2 DOB violations are not all risks. Every type code was classified:
+      hazard        FISPHAZ (facade hazard), FISPFCS (failure to correct
+                    facade repairs), IMEGNCY, EGNCY (emergencies), COMPBLD
+                    (structurally compromised), UB (unsafe building), CLOS
+                    (padlock)                                    3,947 rows
+      equipment     boilers (LBLVIO, HBLVIO, B, LL6291), elevators (E,
+                    AEUHAZ1, EVCAT5, HVCAT5, JVCAT5, LL1081)     69,913 rows
+      construction  C, P                                          7,140 rows
+      admin         BENCH (failure to benchmark energy), EGRADE (energy
+                    grade not posted), EARCX (energy report), LANDMK, Z,
+                    FISPNRF (facade report not filed), FISP, RWNRF
+                                                                 19,769 rows
+    About a fifth of DOB violations are paperwork. Without this split a
+    building that forgot to post its energy grade would look dangerous.
+
+8.3 Open at a past date. A violation counts as open on date D if it closed
+    on or after D, or (no close date known) it is open now. HPD has no
+    explicit close date; the current-status date is used when the
+    violation is closed (an approximation).
+
+8.4 Owner name normalisation: uppercase, punctuation removed, spaces
+    collapsed, trailing entity suffixes stripped (LLC, L L C, INC, CORP,
+    CORPORATION, CO, LP, L P, LTD, LLP, COMPANY). Placeholders such as
+    "UNAVAILABLE OWNER" and "NAME NOT ON FILE" get no owner.
+    owner_id = 'own_' + first 12 hex digits of md5(name).
+
+8.5 Owner type from PLUTO's ownertype code: C city, M mixed, O other public,
+    X tax-exempt, P or blank private (blank is overwhelmingly private).
+
+
+--------------------------------------------------------------------------------
+9. LANDLORD PORTFOLIOS AND MANAGING AGENTS
+--------------------------------------------------------------------------------
+
+Problem: PLUTO's owner of record is usually an LLC that owns one building
+("BIRDIE 141 BROADWAY ASSOCIATES"). The landlord behind it may control many.
+
+Method (the approach used by tools such as JustFix "Who Owns What"):
+  1. Each Manhattan HPD registration is mapped to a PLUTO lot (condo unit
+     lots mapped to the billing lot, as in section 6).
+  2. From its contacts, the registration contributes linking keys:
+       person keys   "P:FIRST LAST" for HeadOfficer, IndividualOwner and
+                     JointOwner contacts (first name present, last name
+                     longer than one character)
+       company keys  "C:NAME" for CorporateOwner names longer than three
+                     characters
+  3. A graph connects lots to keys. Its connected components, found with a
+     union-find, are the portfolios.
+  4. Each portfolio is named after its most-shared person (else company).
+     portfolio_id = 'pf_' + md5 of the component root.
+
+Managing agents are a separate object and are NOT used for linking: one
+management company (e.g. FirstService Residential, 349 lots) runs buildings
+for many unrelated owners, and linking through it would merge strangers.
+Each lot gets the agent from its most recent registration
+(company name, else person name).
+
+Result: 27,832 lots in 13,120 portfolios. 10,174 portfolios are a single
+lot; the largest has 234 lots. A sanity check before committing to the
+method showed no runaway merge (top sizes 236, 231, 169, ...), and known
+large Manhattan landlords appear among the largest. The method even merged
+spelling variants that appear on the same registration ("STEVEN CROMAN" and
+"STEVE CROMAN").
+
+Worked example (the #1 lot today, 3458 Broadway):
+  Owner of record: BIRDIE 141 BROADWAY ASSOCIATES (one building)
+  -> HPD registration head officer
+  -> landlord portfolio of 59 lots, 5,086 units
+  -> 41 of the other 58 lots are in Manhattan's riskiest 10% (median
+     percentile 94.5; 9 are in the top 2%).
+
+
+--------------------------------------------------------------------------------
+10. POINT-IN-TIME FEATURES
+--------------------------------------------------------------------------------
+
+Two DuckDB table macros compute features as of any date, counting only
+events strictly before that date:
+
+    select * from lot_features_at(DATE '2024-01-01');
+    select * from building_features_at(DATE '2024-01-01');
+
+This one design choice makes the backtest honest: the same code produces
+training features (as of 2023-01-01), test features (as of 2024-01-01) and
+today's live features, and none can see later events. Each call runs in
+under half a second.
+
+lot_features_at(as_of) returns, per lot:
+
+  Building facts
+    building_age            as_of year minus year built
+    num_floors, units_res, units_total, num_buildings, is_condo,
+    is_landmark, in_hist_district
+
+  HPD (housing)
+    hpd_c_12m, hpd_b_12m, hpd_a_12m   new class C / B / A+I, last 12 months
+    hpd_open_c                        class C still open on as_of
+    hpd_rent_impairing_12m            rent-impairing violations, 12 months
+    hpd_bc_last_6m, hpd_bc_prior_6m   B+C in the last 6 months vs the 6
+                                      before (trend)
+    hpd_c_per_100_units               class C per 100 units, 12 months
+
+  DOB
+    dob_hazard_36m                    hazard-class violations, 36 months
+    dob_equipment_12m                 boiler / elevator, 12 months
+    dob_admin_12m                     paperwork, 12 months
+    dob_open                          non-admin violations open on as_of
+    complaints_12m                    DOB complaints, 12 months
+
+  Facade
+    facade_status                     worst latest status across the lot's
+                                      buildings (latest filing per BIN)
+    facade_severity                   0-3
+    facade_filing_age_years           age of the oldest "latest filing"
+
+  Owner, landlord, agent (rates over all of their lots, this one included)
+    owner_lots, owner_c_per_100_units
+    portfolio_lots, portfolio_c_per_100_units
+    portfolio_other_hazards_36m       hazard violations on the landlord's
+                                      OTHER buildings
+    portfolio_other_unsafe_facades    UNSAFE facades on the landlord's
+                                      OTHER buildings
+    agent_lots, agent_c_per_100_units
+  These are NULL when the lot has no such link, rather than lumping every
+  unlinked lot into one "unknown" group (a bug that was found and fixed).
+
+building_features_at(as_of) gives the same event counts keyed on BIN, for
+drilling into a single building.
+
+
+--------------------------------------------------------------------------------
+11. OUTCOMES (WHAT THE MODEL PREDICTS)
+--------------------------------------------------------------------------------
+
+Two outcomes, each over the 12 months after the score date:
+
+  serious_hazard     at least one DOB hazard-class violation OR a facade
+                     filing with status UNSAFE.
+                     2024 base rate: 661 of 40,507 lots = 1.63%
+  housing_distress   10 or more new HPD class C violations.
+                     2024 base rate: 1,459 of 40,507 lots = 3.60%
+
+Universe: the 40,507 lots that have at least one building (vacant lots are
+excluded; counting over all 42,504 lots gives 671 and 1,460).
+
+Why two outcomes rather than one "risk": they behave differently. Housing
+distress is chronic and predictable from recent class C counts. Serious
+hazards are rarer and driven by facades and repeat hazards. Section 12
+shows that blending them into one score made it worse at both.
+
+Important caveat: outcomes are RECORDED violations. They partly reflect
+where agencies choose to inspect. The score predicts "will get a serious
+violation", not "is unsafe".
+
+
+--------------------------------------------------------------------------------
+12. THE MODELS
+--------------------------------------------------------------------------------
+
+12.1 Components. Every model except gradient boosting works on 0-1
+     "components" so that coefficients are comparable and explainable.
+     Counts are log-scaled and capped: saturate(x) = log(1+x) / log(1+p99),
+     clipped to [0, 1], where p99 is the 99th percentile of the non-zero
+     values on that date.
+
+       open_c             saturate(hpd_open_c)
+       c_count            saturate(hpd_c_12m)
+       c_rate             saturate(100 * hpd_c_12m / (units_res + 10))
+                          (the +10 shrinks small buildings toward zero, so
+                          an 8-unit building with a few violations does not
+                          look extreme)
+       dob_hazard         saturate(dob_hazard_36m)
+       facade             facade_severity / 3            (v1 only)
+       facade_unsafe      1 if latest facade status UNSAFE
+       facade_swarmp      1 if SWARMP or no report filed
+       dob_open           saturate(dob_open)
+       equipment          saturate(dob_equipment_12m)
+       trend              saturate(hpd_bc_last_6m - hpd_bc_prior_6m)
+       complaints         saturate(complaints_12m)
+       age                (building_age - 20) / 100, clipped to [0, 1]
+       hazard_any         1 if any DOB hazard in 36 months
+       unsafe_and_hazard  1 if UNSAFE facade AND a past hazard
+       portfolio_c_rate   saturate(portfolio_c_per_100_units)
+       portfolio_hazards  saturate(portfolio_other_hazards_36m)
+       portfolio_unsafe   saturate(portfolio_other_unsafe_facades)
+       agent_c_rate       saturate(agent_c_per_100_units)
+
+12.2 rules_v1 (hand-set weights, set before looking at any outcome).
+     Score = 100 x weighted sum: open_c 20%, dob_hazard 20%, facade 15%,
+     c_rate 15%, dob_open 10%, equipment 5%, trend 5%, complaints 5%,
+     age 5%. One score for both outcomes. It lost to simple baselines
+     (section 14) and was kept only as a lesson.
+
+12.3 learned_v2. One logistic regression PER OUTCOME (scikit-learn,
+     C = 1.0) over ten components: open_c, c_count, c_rate, dob_hazard,
+     facade_unsafe, facade_swarmp, dob_open, equipment, trend, age.
+     Trained on features as of 2023-01-01 and 2023 outcomes. The
+     coefficients are the weights, so the model stays explainable.
+
+12.4 learned_v3 (the live model). v2 plus, per outcome, the additions that
+     won on the validation split (section 13):
+       serious_hazard    v2 + hazard_any, unsafe_and_hazard
+       housing_distress  v2 + portfolio_c_rate, portfolio_hazards,
+                         portfolio_unsafe, agent_c_rate
+
+     v3 coefficients (fit on 2023):
+
+       Component          serious_hazard   housing_distress
+       open_c                 +0.55            +3.34
+       c_count                +0.18            +4.59
+       c_rate                 -0.02            -3.07
+       dob_hazard             -0.27            -0.10
+       facade_unsafe          +2.68            +0.35
+       facade_swarmp          +1.93            -0.05
+       dob_open               +1.69            +0.19
+       equipment              +0.41            +0.47
+       trend                  +0.03            +0.34
+       age                    -0.14            -0.14
+       hazard_any             -0.32              -
+       unsafe_and_hazard      +1.15              -
+       portfolio_c_rate         -              +1.56
+       portfolio_hazards        -              +0.72
+       portfolio_unsafe         -              +0.04
+       agent_c_rate             -              +1.45
+
+     Reading them: hazards are driven by facade status (UNSAFE most, then
+     SWARMP), open DOB violations and the UNSAFE-plus-history combination.
+     Housing distress is driven by class C counts, open class C, and the
+     landlord's and agent's class C rates. Negative weights on correlated
+     components (c_rate, dob_hazard, hazard_any) are collinearity: their
+     signal is already carried by a related component.
+
+12.5 Comparisons in every backtest:
+       gradient boosting   scikit-learn HistGradientBoostingClassifier
+                           (300 iterations, learning rate 0.05) on the raw
+                           features. An accuracy ceiling; not explainable.
+       most violations     total violations and complaints, last 12 months
+       same signal         hazards: dob_hazard_36m + 10 x facade_severity;
+                           distress: hpd_c_12m (last year's class C)
+       oldest building     building age
+       random
+
+
+--------------------------------------------------------------------------------
+13. EVALUATION METHOD: TRAIN, VALIDATE, TEST
+--------------------------------------------------------------------------------
+
+Three time-based stages, so the test year is never used for a decision:
+
+  Validation (choose inputs)  fit on features as of 2022-01-01 and 2022
+                              outcomes; score as of 2023-01-01; compare
+                              against 2023 outcomes.
+  Training                    fit the chosen models on 2023-01-01 features
+                              and 2023 outcomes.
+  Test (run once)             score as of 2024-01-01 using only earlier
+                              events; compare against 2024 outcomes.
+
+Splits are by time, never random, because a random split would let a model
+learn from a building's future to predict its past.
+
+Validation table (fit 2022, scored on 2023; AP / P@100):
+
+  Added to v2            serious_hazard       housing_distress
+  (nothing, v2)          0.104 / 23%          0.510 / 90%
+  +complaints            0.100 / 19%          0.510 / 85%
+  +repeat offender       0.115 / 35%          0.510 / 90%
+  +landlord & agent      0.099 / 24%          0.531 / 92%
+  +all                   0.106 / 28%          0.530 / 91%
+
+Decision: repeat-offender components for hazards, landlord and agent
+components for distress. Complaints helped neither and were left out.
+
+Caveat: features as of 2022-01-01 see only 24 of the 36 months for 3-year
+windows, because the data starts in 2020.
+
+
+--------------------------------------------------------------------------------
+14. RESULTS (2024 TEST, 40,507 LOTS)
+--------------------------------------------------------------------------------
+
+serious_hazard (base rate 1.63%, 661 lots)
+
+  Ranker                         P@100  P@250  P@500  P@1000  Rec@500  Lift@100  AP
+  learned_v3 (live)               32%    34%    29%    20%     22%     19.6x   0.146
+  learned_v2                      34%    33%    29%    21%     22%     20.8x   0.143
+  gradient boosting (ceiling)     41%    37%    29%    24%     22%     25.1x   0.208
+  rules_v1 (hand weights)         21%    14%    11%    10%      8%     12.9x   0.063
+  baseline: most violations        3%     4%     4%     4%      3%      1.8x   0.026
+  baseline: same signal           50%    39%    33%    19%     25%     30.6x   0.138
+  baseline: oldest building        0%     0%     0%     0%      0%      0.0x   0.012
+  random                           1%     2%     1%     1%      1%      0.6x   0.016
+
+housing_distress (base rate 3.60%, 1,459 lots)
+
+  Ranker                         P@100  P@250  P@500  P@1000  Rec@500  Lift@100  AP
+  learned_v3 (live)               91%    88%    80%    64%     28%     25.3x   0.572
+  learned_v2                      92%    88%    79%    65%     27%     25.5x   0.563
+  gradient boosting (ceiling)     91%    84%    79%    65%     27%     25.3x   0.570
+  rules_v1 (hand weights)         59%    58%    54%    47%     18%     16.4x   0.367
+  baseline: most violations       86%    85%    78%    62%     27%     23.9x   0.521
+  baseline: same signal           92%    83%    75%    62%     26%     25.5x   0.510
+  baseline: oldest building        0%     0%     0%     0%      0%      0.0x   0.029
+  random                           0%     4%     2%     2%      1%      0.0x   0.034
+
+Full tables: reports/backtest.md, reports/backtest_metrics.csv,
+reports/validation_metrics.csv.
+
+
+--------------------------------------------------------------------------------
+15. WHAT THE RESULTS MEAN
+--------------------------------------------------------------------------------
+
+1. The hand-weighted score lost. Weights chosen by intuition, and one score
+   for two different outcomes, did worse than "last year's count". Fitting
+   one model per outcome fixed it while staying explainable.
+
+2. Explainability costs nothing for housing distress. The logistic model
+   matches gradient boosting at the top (91% vs 91%) and slightly beats it
+   overall (AP 0.572 vs 0.570).
+
+3. Landlords matter. The landlord's and managing agent's class C rates were
+   chosen on validation and held up on the test: AP 0.563 -> 0.572.
+
+4. Validation gains do not always replicate. Repeat-offender components
+   lifted hazard P@100 from 23% to 35% on validation, but on the test v3 got
+   32% vs v2's 34% (AP 0.143 -> 0.146). With about 660 positives, P@100 has
+   roughly +/-5 points of noise (binomial standard error at p = 0.33 and
+   n = 100 is about 4.7 points). No further tuning was done on the test
+   year, because that would quietly turn it into training data.
+
+5. For hazards, a naive repeat-offender rule ("had a hazard or unsafe facade
+   before") leads in the top 100 (50%). Buildings with unsafe facades keep
+   getting cited. The models are better over the whole ranking (AP), not at
+   the very top. A real deployment should put known repeat offenders first
+   explicitly and use the model to rank everything after them.
+
+6. Age alone is useless (0% in the top 100): old buildings are common, and
+   age without condition data predicts nothing.
+
+
+--------------------------------------------------------------------------------
+16. FROM SCORE TO DRIVERS, PERCENTILE AND RANK
+--------------------------------------------------------------------------------
+
+For each lot the live model produces:
+  p_serious_hazard, p_housing_distress   probabilities over 12 months
+  score        100 x the larger of the two percentile ranks
+               ("worse than X% of Manhattan lots on its worse risk")
+  primary_risk the outcome with the higher percentile
+  rank         1 = worst. Many lots tie near 100, so ties are broken by the
+               other outcome's percentile.
+  drivers      the three largest positive contributions (coefficient x
+               component value) for the primary outcome, written in plain
+               words, e.g.
+               "facade UNSAFE; 26 open DOB violations; UNSAFE facade with
+               past hazard violations"
+
+Today's top 100 splits 50 / 50 between the two risks.
+
+Scores are written to risk_assessment for two dates: 2024-01-01 (the
+backtest) and the run date (live).
+
+
+--------------------------------------------------------------------------------
+17. THE STREAMLIT APP        (app/app.py, app/db.py)
+--------------------------------------------------------------------------------
+
+Run: .venv/Scripts/streamlit run app/app.py   (http://localhost:8501)
+
+Page 1 - Risk map
+  pydeck scatter of lots on a Carto Voyager basemap, coloured by score
+  (red top 1%, orange top 5%, yellow top 20%). Filters: minimum score
+  (default 98) and main risk. Hover shows address, rank, risk and drivers.
+  Clicking a lot shows a card with "Open building 360".
+
+Page 2 - Building 360
+  Picker for any lot (by address and rank). Shows:
+    - score, rank of 40,507, both probabilities, main risk and drivers
+    - monthly event timeline since 2020 (Altair, coloured by source) and a
+      filterable event table (type, open only)
+    - lot facts and the buildings on the lot
+    - "Who controls it": owner of record, landlord portfolio (size, units,
+      linking names, and a table of their other lots with scores), managing
+      agent
+    - the lot's inspection tasks and a "Create inspection task" form with
+      reason and priority pre-filled (priority 1 if rank <= 100, 2 if
+      <= 500, else 3)
+
+Page 3 - Inspector queue
+  - Header states the backtest precision of the live model.
+  - Ranked table (filters: main risk, top N, hide lots with an open task).
+  - Multi-select rows -> "Create N task(s)".
+  - Task panel: open / closed tabs, counts, hazard-found count and hit rate.
+    One form applies Assign inspector, Record outcome or Flag false positive.
+
+Testing done in the browser: create tasks from the queue and from Building
+360, record an outcome, map click to Building 360, task counts and hit rate.
+
+
+--------------------------------------------------------------------------------
+18. WRITEBACK AND STORAGE
+--------------------------------------------------------------------------------
+
+Tasks live in data/actions.duckdb, separate from data/building_risk.duckdb.
+The app opens actions.duckdb read-write and attaches the risk database
+read-only as "br". Reason: build_db.py deletes and recreates the risk
+database, and recorded inspector work must never be lost in a rebuild.
+
+Consequence: stop the app before re-running the build scripts, because
+DuckDB lets only one process write a file and the app holds a lock on it.
+
+Recorded outcomes (hazard_found, minor_issues, no_issue, no_access) are the
+labels a future model version would learn from: the feedback loop.
+
+
+--------------------------------------------------------------------------------
+19. THE LANDING PAGE        (site/index.html)
+--------------------------------------------------------------------------------
+
+A single static HTML page with inline CSS, no build step, deployed on Vercel
+(project nyc-building-risk) at https://nyc-building-risk.vercel.app.
+
+Design: black and white with one blue accent (#4C90F0, from Palantir's
+open-source Blueprint palette), sharp corners, hairline grid borders, Inter
+for text and IBM Plex Mono for small uppercase labels. Palantir's colours
+only; no Palantir name or logo, so it cannot read as an official page.
+Dark only.
+
+Sections: hero with question and links, four headline stats, map screenshot,
+"How it works" (six steps and an ontology diagram), landlord example,
+"Does it work?" (bar charts for both outcomes and three findings), app
+screenshots, tech stack, footer with NYC Open Data credit.
+
+Checked at 1440 px and 375 px: no horizontal scroll, all images load.
+Screenshots are WebP, 262 KB in total (from 2.2 MB of PNG). The ontology
+diagram keeps a minimum width and scrolls inside its box on phones.
+
+Redeploy after edits:   cd site && npx vercel deploy --prod
+.vercelignore excludes .env* files; a token file the Vercel CLI created was
+deleted, and /.env.local returns 404 on the live site.
+
+
+--------------------------------------------------------------------------------
+20. REPOSITORY LAYOUT
+--------------------------------------------------------------------------------
+
+  README.md                   front page: summary, diagrams, results, run
+  requirements.txt            pinned versions (duckdb 2.0.0, pandas 3.1.0,
+                              scikit-learn 1.9.1, streamlit 1.66.1,
+                              altair 6.3.0, pydeck 0.9.3, playwright 1.64.1)
+  ontology/ontology.yaml      object types, links, derived properties,
+                              actions
+  scripts/download.sh         pull raw CSVs from NYC Open Data
+  scripts/build_db.py         load, clean, resolve to BIN/BBL, match_report
+  scripts/build_ontology.py   owners, portfolios, agents, DOB classes,
+                              events, feature macros, link_check
+  scripts/score.py            components, models v1/v2/v3, validation,
+                              backtest, report, risk_assessment
+  scripts/screenshots.py      README screenshots via Playwright + local Edge
+  app/app.py                  Streamlit pages
+  app/db.py                   queries and actions
+  reports/backtest.md         generated results report
+  reports/*_metrics.csv       raw metrics (backtest and validation)
+  docs/writeup.md             one-page write-up
+  docs/demo-script.md         timed script for a 2.5-minute demo video
+  docs/PROJECT_GUIDE.txt      this file
+  docs/img/                   app screenshots (PNG)
+  site/                       landing page (index.html, img/*.webp)
+  data/                       (git-ignored) raw CSVs and DuckDB files
+
+
+--------------------------------------------------------------------------------
+21. HOW TO RUN EVERYTHING
+--------------------------------------------------------------------------------
+
+  uv venv --python 3.12 .venv
+  uv pip install --python .venv -r requirements.txt
+  bash scripts/download.sh                        # about 480 MB, a few min
+  .venv/Scripts/python scripts/build_db.py        # about 1 min
+  .venv/Scripts/python scripts/build_ontology.py
+  .venv/Scripts/python scripts/score.py           # about 20 s
+  .venv/Scripts/streamlit run app/app.py          # http://localhost:8501
+
+  (On macOS/Linux use .venv/bin/ instead of .venv/Scripts/.)
+
+Useful queries in DuckDB (data/building_risk.duckdb):
+  select * from match_report;
+  select * from link_check;
+  select * from lot_features_at(DATE '2024-01-01');
+  select * from risk_assessment where as_of = current_date order by rank;
+
+
+--------------------------------------------------------------------------------
+22. DESIGN DECISIONS AND TRADE-OFFS
+--------------------------------------------------------------------------------
+
+Lot (BBL) as the scoring unit, not building (BIN)
+  Every source reaches the lot (99.5%+); HPD cannot reach the building when
+  a lot has several. Most Manhattan lots hold one building (37,924 of
+  42,504), so little is lost, and Building 360 still drills to BIN.
+
+DuckDB instead of Postgres or a graph database
+  One file, no server, fast columnar SQL, table macros for point-in-time
+  features. A graph database was unnecessary: the links are simple keys,
+  and the one graph problem (portfolios) is a union-find in Python.
+
+Logistic regression over gradient boosting for the product
+  Coefficients are readable weights and every score splits into named
+  drivers. Gradient boosting is kept as a ceiling to measure what
+  explainability costs (nothing for distress; real for hazards).
+
+Two outcomes instead of one risk score
+  They have different drivers and base rates; one blended score diluted
+  both (v1).
+
+Point-in-time macros instead of a precomputed feature table
+  One definition serves training, testing and live scoring, which rules
+  out future leakage by construction.
+
+Managing agents kept out of portfolio linking
+  Precision over recall: merging unrelated owners through a shared
+  management company would invent portfolios.
+
+Exact-name linking for portfolios
+  Simple, auditable, no false merges from fuzzy matching. Costs some recall
+  (spelling variants across registrations stay split).
+
+Writeback in a separate database file
+  Rebuilding derived data must never destroy human work.
+
+Manhattan only, 2020 onward
+  Fits the 10-12 hour budget and keeps every step under a minute. The code
+  is borough-agnostic apart from the download filters.
+
+Streamlit for the app
+  Fastest way to a working map, detail page and forms in Python. It stands
+  in for what Foundry's Workshop would provide.
+
+
+--------------------------------------------------------------------------------
+23. LIMITATIONS
+--------------------------------------------------------------------------------
+
+- Outcomes are recorded violations, which reflect inspection patterns as
+  well as building condition.
+- Building attributes (owner, floors, units) and landlord links are today's
+  values, also used in the backtest (mild look-ahead).
+- HPD close dates are approximated by the current-status date.
+- HPD violations reach BIN only when the lot holds one building (89.2%).
+- Landlord linking uses exact names; spelling variants across registrations
+  stay split. Only HPD-registered rentals (about 28k of 40.5k lots) have a
+  portfolio.
+- Managing-agent names are not normalised ("STELLAR MGMT" vs "STELLAR
+  MANAGEMENT" count as different agents).
+- Validation features for 2022 see only 24 of 36 months for 3-year windows.
+- About 10k facade filings have no filing date (mostly "No Report Filed").
+- Top-100 precision has about +/-5 points of sampling noise for hazards.
+- Manhattan only; no 311 or FDNY data.
+
+
+--------------------------------------------------------------------------------
+24. BUGS FOUND ALONG THE WAY, AND WHAT THEY TAUGHT
+--------------------------------------------------------------------------------
+
+- Hand-set weights lost to baselines -> measure against naive baselines
+  before trusting any score.
+- Unlinked lots lumped into one NULL group in window functions, giving them
+  a shared fake "owner rate" -> NULL keys need explicit handling in
+  partitions.
+- Queue selection survived a refresh while the table changed, so a second
+  click would have tasked the wrong buildings -> reset widget state after
+  actions that change the underlying list.
+- Complaints appeared to stop in April 2024; the source was later refreshed
+  -> check a feed's update date before concluding data is missing.
+- A demo-script claim ("almost all in the top 2%") turned out to be 9 of 58
+  -> verify every number before publishing it.
+- "About a third of DOB violations are paperwork" was actually a fifth ->
+  same lesson.
+- Scoring took over 10 minutes because driver text was built row by row
+  with iterrows -> vectorise, and skip work whose output is not used
+  (now about 20 seconds).
+- The basemap looked blank in previews; it was rendering but too pale to
+  see in scaled screenshots -> check at full resolution before "fixing".
+- The landing-page preview failed on port 5060, which Chromium blocks
+  (SIP) -> use common dev ports.
+- The Vercel CLI wrote an access token into the site folder -> exclude
+  .env* explicitly from deployments and delete what is not needed.
+
+
+--------------------------------------------------------------------------------
+25. FUTURE WORK
+--------------------------------------------------------------------------------
+
+- Fuzzy-match landlord names and business addresses to merge spelling
+  variants; normalise managing-agent names.
+- An explicit "repeat offenders first" rule in the hazard queue, with the
+  model ranking the rest; evaluate it on a validation year first.
+- Use recorded task outcomes as labels (true inspection results rather than
+  recorded violations).
+- All five boroughs; 311 service requests as an early-warning signal.
+- Historical snapshots of PLUTO and registrations to remove look-ahead in
+  static attributes.
+- Rebuild the ontology, actions and app in Palantir Foundry (Ontology
+  Manager, Workshop, Actions), for example on the AIP Developer Tier.
+- A hosted demo: a small snapshot of scores and events (about 20 MB) would
+  let the Streamlit app run on Streamlit Community Cloud.
+
+
+--------------------------------------------------------------------------------
+26. INTERVIEW TALKING POINTS
+--------------------------------------------------------------------------------
+
+- Start with the user and decision (which buildings first, and why), not
+  the model.
+- Entity resolution was most of the work: three different keys, condo
+  billing lots, placeholder BINs, and a measured match rate per source.
+- The ontology makes non-obvious links visible: an LLC on paper becomes a
+  59-building landlord whose other buildings are mostly high-risk.
+- Point-in-time features make the backtest trustworthy by construction.
+- Honest evaluation: the first version lost to baselines; a validation gain
+  did not replicate; the test year was used once.
+- Explainability was measured, not assumed: free for housing distress,
+  costly for hazards.
+- Writeback closes the loop: inspector outcomes become future labels.
+- Three judgement calls worth explaining: why the lot is the scoring unit,
+  why managing agents do not link landlords, and why there was no further
+  tuning after the hazard result.
+
+
+--------------------------------------------------------------------------------
+27. PROJECT TIMELINE (2026-10-26 to 2026-10-27)
+--------------------------------------------------------------------------------
+
+  1. Outline and scope (10-12 hours, Manhattan, 2020 onward)
+  2. Download five core datasets; add footprints as the BIN<->BBL bridge
+  3. Load into DuckDB; resolve every record to BIN/BBL; match report
+  4. Ontology: owners, events, DOB classes, links, point-in-time macros
+  5. Risk score v1 (lost to baselines) -> learned v2 per outcome; 2024
+     backtest
+  6. Streamlit app: map, Building 360, inspector queue with writeback
+  7. Git repository, GitHub, README with screenshots, write-up, demo
+     script
+  8. Improvements: HPD registrations (landlord portfolios, agents), full
+     complaints feed, validated v3 model
+  9. Landing page on Vercel; redesigned in a Palantir-style palette
+ 10. This guide
+
+================================================================================
+End of guide.
+================================================================================

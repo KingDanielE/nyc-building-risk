@@ -116,7 +116,7 @@ portfolio with their other buildings' scores, managing agent), create task.
 
 ```bash
 uv venv --python 3.12 .venv && uv pip install --python .venv -r requirements.txt
-bash scripts/download.sh                          # ~470 MB into data/raw
+bash scripts/download.sh                          # ~480 MB into data/raw
 .venv/Scripts/python scripts/build_db.py          # -> data/building_risk.duckdb
 .venv/Scripts/python scripts/build_ontology.py
 .venv/Scripts/python scripts/score.py             # -> reports/backtest.md
