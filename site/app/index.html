@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Building Risk · Manhattan</title>
+<meta name="description" content="Risk map, building 360 and inspector queue for 40,507 Manhattan tax lots, scored from NYC open data.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='black'/><path d='M9 24V12l7-4 7 4v12h-5v-6h-4v6z' fill='white'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<link href="app.css" rel="stylesheet">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#map"><i></i>Building Risk <span class="label">Manhattan</span></a>
+  <nav>
+    <a href="#map" data-page="map">Risk map</a>
+    <a href="#lot" data-page="lot">Building 360</a>
+    <a href="#queue" data-page="queue">Inspector queue</a>
+    <a class="ext" href="/">About ↗</a>
+  </nav>
+</header>
+
+<main>
+  <div id="loading" class="loading"><span class="label">Loading 40,507 scored lots…</span><div class="bar"><i></i></div></div>
+
+  <!-- Risk map -->
+  <section id="page-map" class="page" hidden>
+    <div class="map-layout">
+      <aside class="panel">
+        <h1>Risk map</h1>
+        <p class="muted" id="map-caption"></p>
+        <label class="field"><span class="label">Minimum score <b id="min-score-v">98</b></span>
+          <input id="min-score" type="range" min="0" max="100" step="1" value="98"></label>
+        <fieldset class="field"><legend class="label">Main risk</legend>
+          <label class="check"><input type="checkbox" name="map-risk" value="0" checked> Serious hazard</label>
+          <label class="check"><input type="checkbox" name="map-risk" value="1" checked> Housing distress</label>
+        </fieldset>
+        <div class="legend">
+          <span><i class="dot c99"></i>Top 1%</span><span><i class="dot c95"></i>Top 5%</span>
+          <span><i class="dot c80"></i>Top 20%</span><span><i class="dot c0"></i>Other</span>
+        </div>
+        <p class="faint" id="map-count"></p>
+        <div id="picked" class="picked" hidden></div>
+      </aside>
+      <div id="map" class="map"></div>
+    </div>
+  </section>
+
+  <!-- Building 360 -->
+  <section id="page-lot" class="page wrap" hidden>
+    <div class="search">
+      <input id="lot-search" type="search" placeholder="Search address or BBL…" autocomplete="off" aria-label="Find a lot">
+      <ul id="lot-results" class="results" hidden></ul>
+    </div>
+    <div id="lot-body"></div>
+  </section>
+
+  <!-- Inspector queue -->
+  <section id="page-queue" class="page wrap" hidden>
+    <h1>Inspector queue</h1>
+    <p class="muted" id="queue-caption"></p>
+    <div class="filters">
+      <label class="check"><input type="checkbox" name="q-risk" value="0" checked> Serious hazard</label>
+      <label class="check"><input type="checkbox" name="q-risk" value="1" checked> Housing distress</label>
+      <label class="inline">Show top <select id="q-top"><option>25</option><option selected>100</option><option>250</option><option>500</option><option>1000</option></select></label>
+      <label class="check"><input type="checkbox" id="q-hide" checked> Hide lots with an open task</label>
+    </div>
+    <div class="table-wrap tall"><table id="q-table" class="grid"></table></div>
+    <div class="actions">
+      <button id="q-create" class="btn primary" disabled>Create 0 task(s)</button>
+      <button id="q-open" class="btn" hidden>Open building 360</button>
+    </div>
+
+    <h2>Tasks</h2>
+    <p class="note">Hosted demo: tasks are saved in this browser only. The local Streamlit version writes them to DuckDB.</p>
+    <div class="kpis" id="t-kpis"></div>
+    <div class="tabs"><button class="tab on" data-tab="open">Open</button><button class="tab" data-tab="done">Closed</button></div>
+    <div id="t-open"></div>
+    <div id="t-done" hidden></div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

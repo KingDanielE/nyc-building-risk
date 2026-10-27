@@ -15,9 +15,10 @@ page and a work queue whose actions are written back.
 | **Ontology** | LandlordPortfolio / ManagingAgent / Owner → Lot → Building → Event, plus RiskAssessment and InspectionTask (writeback) |
 | **Landlords** | HPD registrations link single-building LLCs to the people behind them: 27.8k lots in 13k portfolios (largest: 234 lots) |
 | **Backtest (2024, unseen)** | Top 100 lots: **91%** had 10+ new class C housing violations (25× the base rate); **32%** had a serious hazard (20×) |
-| **App** | Streamlit: risk map, building 360, inspector queue with create / assign / record-outcome actions |
+| **App** | Risk map, building 360, inspector queue with create / assign / record-outcome actions. Streamlit locally; [live browser version](https://nyc-building-risk.vercel.app/app/) on Vercel |
 
-**Project page: [nyc-building-risk.vercel.app](https://nyc-building-risk.vercel.app)** ·
+**Live tool: [nyc-building-risk.vercel.app/app](https://nyc-building-risk.vercel.app/app/)** ·
+Project page: [nyc-building-risk.vercel.app](https://nyc-building-risk.vercel.app) ·
 Write-up: [docs/writeup.md](docs/writeup.md) · Backtest: [reports/backtest.md](reports/backtest.md)
 
 ![Risk map](docs/img/map.png)
@@ -126,6 +127,13 @@ bash scripts/download.sh                          # ~480 MB into data/raw
 (`bin/` instead of `Scripts/` on macOS/Linux.) Stop the app before re-running the build
 scripts: it holds a read lock on the database. `scripts/screenshots.py` regenerates the
 images above from the running app.
+
+**Hosted version.** Vercel can't run Streamlit (it needs a long-running server with
+websockets), so [site/app/](site/app/) is a static JavaScript version of the same three
+pages. `scripts/export_web.py` writes its data as gzipped JSON: all scored lots in one file,
+plus one file per tax block holding the lots' events, fetched when a building opens. Tasks there
+are saved in the viewer's browser. Redeploy with
+`.venv/Scripts/python scripts/export_web.py && cd site && npx vercel --prod`.
 
 ```sql
 -- Explore in DuckDB

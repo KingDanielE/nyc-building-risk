@@ -5,6 +5,7 @@ Complete project guide: what was built, how, why, and what it showed
 
 Repository : https://github.com/KingDanielE/nyc-building-risk
 Project page: https://nyc-building-risk.vercel.app
+Live tool   : https://nyc-building-risk.vercel.app/app/
 Scope       : Manhattan, events from 2020-01-01 to 2026-10-26
 Last updated: 2026-10-27
 
@@ -27,7 +28,7 @@ CONTENTS
   16. How a score is turned into drivers, a percentile and a rank
   17. The Streamlit app
   18. Writeback and storage
-  19. The landing page
+  19. The landing page and the hosted tool
   20. Repository layout
   21. How to run everything
   22. Design decisions and trade-offs
@@ -52,7 +53,8 @@ facade filings) happen at them. On top of that ontology it computes features
 trouble in the next 12 months, tests the model on a year it never saw, and
 serves the result in a Streamlit app where an inspection planner can see why a
 building is risky and create, assign and close inspection tasks. A static
-landing page on Vercel presents the project.
+landing page on Vercel presents the project, and a browser version of the
+tool is hosted next to it at /app/.
 
 Headline numbers:
   - 1,281,497 events from 8 sources, Manhattan, 2020 onward
@@ -755,7 +757,7 @@ labels a future model version would learn from: the feedback loop.
 
 
 --------------------------------------------------------------------------------
-19. THE LANDING PAGE        (site/index.html)
+19. THE LANDING PAGE AND THE HOSTED TOOL   (site/)
 --------------------------------------------------------------------------------
 
 A single static HTML page with inline CSS, no build step, deployed on Vercel
@@ -780,6 +782,39 @@ Redeploy after edits:   cd site && npx vercel deploy --prod
 .vercelignore excludes .env* files; a token file the Vercel CLI created was
 deleted, and /.env.local returns 404 on the live site.
 
+The hosted tool (site/app/, https://nyc-building-risk.vercel.app/app/)
+Vercel cannot run Streamlit: it serves static files and short serverless
+functions, while Streamlit needs a long-running Python server holding a
+websocket per viewer. So the hosted version is a static re-implementation of
+the same three pages in plain JavaScript (no build step), reading data that
+scripts/export_web.py exports from the DuckDB database:
+  - meta.json.gz: as-of date, model version, 2024 top-100 precision.
+  - lots.json.gz (2.4 MB): all 40,507 scored lots with rank, score, main
+    risk, drivers, both probabilities, address, coordinates, units, owner,
+    portfolio and agent ids, plus the portfolio and agent tables.
+  - lot/<block>.json.gz: one file per tax block (1,941 files) with each
+    lot's facts, buildings and events. A building page fetches only its
+    block, so the 1.28M events never load at once. Descriptions are cut to
+    160 characters. 23 MB in total.
+Files are gzipped at export; the page checks for the gzip header and
+decompresses with the browser's DecompressionStream.
+  - Risk map: MapLibre GL over the CARTO dark basemap; same score filter,
+    risk filter, colours and tooltip as the Streamlit map.
+  - Building 360: search by address or BBL, metrics, drivers, a monthly
+    stacked-bar timeline (SVG), filterable event table, lot facts,
+    buildings, owner, landlord portfolio with its other lots, managing
+    agent, tasks and a create-task form.
+  - Inspector queue: same filters, multi-select, create tasks, and the
+    assign / record outcome / flag false positive actions with KPIs.
+Writeback difference: with no backend, tasks are stored in the viewer's
+browser (localStorage), and the page says so. The local Streamlit app keeps
+writing to data/actions.duckdb. A shared hosted task store would need a
+database service (e.g. Postgres) and an API.
+Regenerate and redeploy:
+  .venv/Scripts/python scripts/export_web.py && cd site && npx vercel --prod
+site/app/data/ is git-ignored (generated) but uploaded by the Vercel CLI,
+because .vercelignore, not .gitignore, decides what is uploaded.
+
 
 --------------------------------------------------------------------------------
 20. REPOSITORY LAYOUT
@@ -798,6 +833,7 @@ deleted, and /.env.local returns 404 on the live site.
   scripts/score.py            components, models v1/v2/v3, validation,
                               backtest, report, risk_assessment
   scripts/screenshots.py      README screenshots via Playwright + local Edge
+  scripts/export_web.py       gzipped JSON for the hosted tool (site/app/data)
   app/app.py                  Streamlit pages
   app/db.py                   queries and actions
   reports/backtest.md         generated results report
@@ -807,6 +843,7 @@ deleted, and /.env.local returns 404 on the live site.
   docs/PROJECT_GUIDE.txt      this file
   docs/img/                   app screenshots (PNG)
   site/                       landing page (index.html, img/*.webp)
+  site/app/                   hosted browser version of the tool
   data/                       (git-ignored) raw CSVs and DuckDB files
 
 
@@ -984,6 +1021,7 @@ Streamlit for the app
   8. Improvements: HPD registrations (landlord portfolios, agents), full
      complaints feed, validated v3 model
   9. Landing page on Vercel; redesigned in a Palantir-style palette
+ 10. Hosted browser version of the tool at /app/
  10. This guide
 
 ================================================================================
